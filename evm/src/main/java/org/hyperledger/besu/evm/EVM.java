@@ -95,6 +95,7 @@ public class EVM {
 
   // Optimized operation flags
   private final boolean enableShanghai;
+  private final boolean enableOsaka;
 
   /**
    * Instantiates a new Evm.
@@ -122,6 +123,7 @@ public class EVM {
             evmConfiguration.maxInitcodeSizeOverride().orElse(evmSpecVersion.maxInitcodeSize));
 
     enableShanghai = EvmSpecVersion.SHANGHAI.ordinal() <= evmSpecVersion.ordinal();
+    enableOsaka = EvmSpecVersion.OSAKA.ordinal() <= evmSpecVersion.ordinal();
   }
 
   /**
@@ -252,6 +254,10 @@ public class EVM {
               case 0x18 -> XorOperation.staticOperation(frame);
               case 0x19 -> NotOperation.staticOperation(frame);
               case 0x1a -> ByteOperation.staticOperation(frame);
+              case 0x1e ->
+                  enableOsaka
+                      ? CountLeadingZerosOperation.staticOperation(frame)
+                      : InvalidOperation.invalidOperationResult(opcode);
               case 0x50 -> PopOperation.staticOperation(frame);
               case 0x56 -> JumpOperation.staticOperation(frame);
               case 0x57 -> JumpiOperation.staticOperation(frame);
