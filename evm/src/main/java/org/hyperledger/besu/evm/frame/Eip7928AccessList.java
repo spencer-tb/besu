@@ -21,6 +21,9 @@ import org.apache.tuweni.units.bigints.UInt256;
 /**
  * Interface for tracking accessed accounts and storage slots during transaction execution for the
  * purpose of generating EIP-7928 Block Access Lists.
+ *
+ * <p>Supports journaling via {@link #mark()} and {@link #undo(long)} so that access list entries
+ * from reverted or halted child frames can be rolled back.
  */
 public interface Eip7928AccessList {
 
@@ -47,4 +50,20 @@ public interface Eip7928AccessList {
 
   /** Clears all tracked access list entries. */
   void clear();
+
+  /**
+   * Returns the current journal mark. Used to snapshot the access list state before entering a
+   * child frame so it can be restored on revert or exceptional halt.
+   *
+   * @return a mark representing the current state
+   */
+  long mark();
+
+  /**
+   * Rolls back all access list changes made after the given mark. Accounts and slots added since
+   * the mark are removed.
+   *
+   * @param mark the mark to roll back to
+   */
+  void undo(long mark);
 }
