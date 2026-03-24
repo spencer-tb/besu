@@ -14,6 +14,7 @@
  */
 package org.hyperledger.besu.ethereum.mainnet.block.access.list;
 
+import org.hyperledger.besu.collections.undo.Undoable;
 import org.hyperledger.besu.datatypes.Address;
 import org.hyperledger.besu.datatypes.StorageSlotKey;
 import org.hyperledger.besu.datatypes.Wei;
@@ -25,7 +26,9 @@ import org.hyperledger.besu.evm.worldstate.StackedUpdater;
 import org.hyperledger.besu.evm.worldstate.UpdateTrackingAccount;
 import org.hyperledger.besu.evm.worldstate.WorldUpdater;
 
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -39,6 +42,18 @@ public class AccessLocationTracker implements Eip7928AccessList {
 
   private final int blockAccessIndex;
   private final Map<Address, AccountAccessList> touchedAccounts = new ConcurrentHashMap<>();
+  private final List<UndoEntry> undoLog = new ArrayList<>();
+
+  /** Journal entry recording an account or slot addition for undo support. */
+  private record UndoEntry(Address address, UInt256 slot, boolean isNewAccount, long level) {
+    static UndoEntry account(final Address address, final long level) {
+      return new UndoEntry(address, null, true, level);
+    }
+
+    static UndoEntry slot(final Address address, final UInt256 slot, final long level) {
+      return new UndoEntry(address, slot, false, level);
+    }
+  }
 
   public AccessLocationTracker(final int blockAccessIndex) {
     this.blockAccessIndex = blockAccessIndex;
@@ -47,17 +62,46 @@ public class AccessLocationTracker implements Eip7928AccessList {
   @Override
   public void clear() {
     touchedAccounts.clear();
+    undoLog.clear();
   }
 
   @Override
   public void addTouchedAccount(final Address address) {
-    touchedAccounts.putIfAbsent(address, new AccountAccessList(address));
+    if (touchedAccounts.putIfAbsent(address, new AccountAccessList(address)) == null) {
+      undoLog.add(UndoEntry.account(address, Undoable.incrementMarkStatic()));
+    }
   }
 
   @Override
   public void addSlotAccessForAccount(final Address address, final UInt256 slotKey) {
     addTouchedAccount(address);
-    touchedAccounts.get(address).addSlotAccess(slotKey);
+    final AccountAccessList accountList = touchedAccounts.get(address);
+    if (accountList.addSlotAccess(slotKey)) {
+      undoLog.add(UndoEntry.slot(address, slotKey, Undoable.incrementMarkStatic()));
+    }
+  }
+
+  @Override
+  public long mark() {
+    return Undoable.markState.get();
+  }
+
+  @Override
+  public void undo(final long mark) {
+    int pos = undoLog.size() - 1;
+    while (pos >= 0 && undoLog.get(pos).level() > mark) {
+      final UndoEntry entry = undoLog.get(pos);
+      if (entry.isNewAccount()) {
+        touchedAccounts.remove(entry.address());
+      } else {
+        final AccountAccessList accountList = touchedAccounts.get(entry.address());
+        if (accountList != null) {
+          accountList.removeSlotAccess(entry.slot());
+        }
+      }
+      undoLog.remove(pos);
+      pos--;
+    }
   }
 
   public Collection<AccountAccessList> getTouchedAccounts() {
@@ -72,8 +116,23 @@ public class AccessLocationTracker implements Eip7928AccessList {
       this.address = address;
     }
 
-    public void addSlotAccess(final UInt256 slotKey) {
-      slots.add(slotKey);
+    /**
+     * Adds a slot access. Returns true if the slot was newly added.
+     *
+     * @param slotKey the slot key
+     * @return true if the slot was not already present
+     */
+    public boolean addSlotAccess(final UInt256 slotKey) {
+      return slots.add(slotKey);
+    }
+
+    /**
+     * Removes a slot access (used by undo).
+     *
+     * @param slotKey the slot key to remove
+     */
+    public void removeSlotAccess(final UInt256 slotKey) {
+      slots.remove(slotKey);
     }
 
     public Address getAddress() {

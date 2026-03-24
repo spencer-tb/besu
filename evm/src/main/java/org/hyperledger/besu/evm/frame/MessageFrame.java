@@ -1357,6 +1357,7 @@ public class MessageFrame {
   /** Undo all the changes done by this message frame, such as when a revert is called for. */
   public void rollback() {
     txValues.undoChanges(undoMark);
+    eip7928AccessList.ifPresent(bal -> bal.undo(undoMark));
   }
 
   /**
