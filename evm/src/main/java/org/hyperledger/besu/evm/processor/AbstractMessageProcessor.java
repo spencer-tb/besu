@@ -131,7 +131,12 @@ public abstract class AbstractMessageProcessor {
     frame.clearLogs();
     frame.clearGasRefund();
 
-    frame.rollback();
+    // EIP-7928: Only undo BAL entries for child frames (depth > 0).
+    // The initial frame (depth 0) preserves its BAL entries even on revert,
+    // because the BAL tracks what was accessed — reverted txs still include
+    // accessed addresses with empty change lists per the spec.
+    final boolean isChildFrame = frame.getMessageFrameStack().size() > 1;
+    frame.rollback(isChildFrame);
   }
 
   /**

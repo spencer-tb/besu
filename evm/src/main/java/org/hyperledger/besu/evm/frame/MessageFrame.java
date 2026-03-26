@@ -1356,8 +1356,21 @@ public class MessageFrame {
 
   /** Undo all the changes done by this message frame, such as when a revert is called for. */
   public void rollback() {
+    rollback(true);
+  }
+
+  /**
+   * Rolls back state changes to the undo mark. When undoBAL is true, also rolls back BAL entries
+   * (for child frames). When false, BAL entries are preserved (for the initial frame, where the
+   * spec requires reverted txs to still include accessed addresses).
+   *
+   * @param undoBAL whether to undo BAL entries
+   */
+  public void rollback(final boolean undoBAL) {
     txValues.undoChanges(undoMark);
-    eip7928AccessList.ifPresent(bal -> bal.undo(undoMark));
+    if (undoBAL) {
+      eip7928AccessList.ifPresent(bal -> bal.undo(undoMark));
+    }
   }
 
   /**
