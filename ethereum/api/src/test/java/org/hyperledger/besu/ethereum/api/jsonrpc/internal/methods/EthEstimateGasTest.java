@@ -52,6 +52,9 @@ import org.hyperledger.besu.ethereum.transaction.TransactionInvalidReason;
 import org.hyperledger.besu.ethereum.transaction.TransactionSimulator;
 import org.hyperledger.besu.ethereum.transaction.TransactionSimulatorResult;
 import org.hyperledger.besu.ethereum.worldstate.WorldStateArchive;
+import org.hyperledger.besu.evm.frame.MessageFrame;
+import org.hyperledger.besu.evm.frame.SoftFailureReason;
+import org.hyperledger.besu.evm.operation.Operation.OperationResult;
 import org.hyperledger.besu.evm.tracing.OperationTracer;
 
 import java.util.Map;
@@ -685,6 +688,39 @@ public class EthEstimateGasTest {
   }
 
   @Test
+  public void shouldNotSettleOnAGasLimitAtWhichANestedCallFailsItsPrecheck() {
+    // a call with input, so that the estimate does not take the plain value transfer path
+    final CallParameter callParameter =
+        ImmutableCallParameter.builder()
+            .sender(Address.fromHexString("0x0"))
+            .to(Address.fromHexString("0x0"))
+            .input(Bytes.of(1))
+            .build();
+    final TransactionSimulatorResult success = successfulSimulation(50_000L);
+    final MessageFrame frame = mock(MessageFrame.class);
+    final OperationResult balanceCheckFailure =
+        new OperationResult(100L, 1, SoftFailureReason.LEGACY_INSUFFICIENT_BALANCE);
+    // below 60,000 gas a nested call fails its balance check, before any frame starts
+    when(transactionSimulator.processOnPending(
+            any(), eq(Optional.empty()), any(), any(OperationTracer.class), eq(pendingBlockHeader)))
+        .thenAnswer(
+            invocation -> {
+              final CallParameter simulated = invocation.getArgument(0);
+              final OperationTracer tracer = invocation.getArgument(3);
+              if (simulated.getGas().orElseThrow() < 60_000L) {
+                tracer.tracePostExecution(frame, balanceCheckFailure);
+              }
+              return Optional.of(success);
+            });
+
+    final JsonRpcResponse response = method.response(ethEstimateGasRequest(callParameter));
+
+    assertThat(response).isInstanceOf(JsonRpcSuccessResponse.class);
+    final String estimate = (String) ((JsonRpcSuccessResponse) response).getResult();
+    assertThat(Long.decode(estimate)).isGreaterThanOrEqualTo(60_000L);
+  }
+
+  @Test
   public void shouldReturnMinTxCostForPlainTransferWithSingleSimulation() {
     mockSimulationAtGasLimit(MIN_TX_GAS_COST, true, MIN_TX_GAS_COST);
 
@@ -713,6 +749,16 @@ public class EthEstimateGasTest {
             any(OperationTracer.class),
             eq(pendingBlockHeader)))
         .thenReturn(Optional.of(mockTxSimResult));
+  }
+
+  private static TransactionSimulatorResult successfulSimulation(final long estimateGasUsed) {
+    final TransactionSimulatorResult mockTxSimResult = mock(TransactionSimulatorResult.class);
+    final TransactionProcessingResult mockResult = mock(TransactionProcessingResult.class);
+    when(mockResult.getEstimateGasUsedByTransaction()).thenReturn(estimateGasUsed);
+    when(mockResult.getRevertReason()).thenReturn(Optional.empty());
+    when(mockTxSimResult.result()).thenReturn(mockResult);
+    when(mockTxSimResult.isSuccessful()).thenReturn(true);
+    return mockTxSimResult;
   }
 
   private void failEstimationOnTxMinGas() {

@@ -26,6 +26,7 @@ import org.hyperledger.besu.ethereum.transaction.CallParameter;
 import org.hyperledger.besu.ethereum.transaction.TransactionSimulator;
 import org.hyperledger.besu.ethereum.transaction.TransactionSimulatorResult;
 import org.hyperledger.besu.evm.frame.MessageFrame;
+import org.hyperledger.besu.evm.operation.Operation.OperationResult;
 import org.hyperledger.besu.evm.tracing.OperationTracer;
 
 import java.util.Optional;
@@ -214,8 +215,10 @@ public class EthEstimateGas extends AbstractEstimateGas {
   }
 
   /**
-   * Counts the nested calls and creations of a transaction that fail, reverts included. It only
-   * needs frame exits, so it opts out of the per-operation hooks of EVM v2.
+   * Counts the nested calls and creations of a transaction that fail, reverts included, and the
+   * ones that fail their balance or depth check before they start. The EVM calls the per-operation
+   * hook that sees those checks for any enabled tracer, except EVM v2, which this tracer lets keep
+   * its untraced loop, so on EVM v2 only the failed frames are counted.
    */
   private static final class FailedCallCounter implements OperationTracer {
     private int failedCalls;
@@ -223,6 +226,14 @@ public class EthEstimateGas extends AbstractEstimateGas {
     @Override
     public boolean tracesOperations() {
       return false;
+    }
+
+    @Override
+    public void tracePostExecution(
+        final MessageFrame frame, final OperationResult operationResult) {
+      if (operationResult.getSoftFailureReason().isPresent()) {
+        failedCalls++;
+      }
     }
 
     @Override
