@@ -98,6 +98,7 @@ public class EthEstimateGasTest {
     when(blockchainQueries.getMinimumTransactionCost(any())).thenReturn(MIN_TX_GAS_COST);
     when(blockchainQueries.accountBalance(any(), any())).thenReturn(Optional.of(Wei.MAX_WEI));
     when(blockchainQueries.getTransactionGasLimitCap(any())).thenReturn(Long.MAX_VALUE);
+    when(blockchainQueries.getTransactionExecutionGasLimit(any())).thenReturn(Long.MAX_VALUE);
     when(genesisBlockHeader.getGasLimit()).thenReturn(BLOCK_GAS_LIMIT);
     when(genesisBlockHeader.getNumber()).thenReturn(0L);
     when(finalizedBlockHeader.getGasLimit()).thenReturn(BLOCK_GAS_LIMIT);
