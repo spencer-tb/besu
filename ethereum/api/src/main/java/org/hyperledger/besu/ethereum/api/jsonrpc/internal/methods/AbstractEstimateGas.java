@@ -44,6 +44,7 @@ import org.hyperledger.besu.ethereum.transaction.exceptions.BlockStateCallExcept
 import org.hyperledger.besu.evm.tracing.OperationTracer;
 
 import java.util.Optional;
+import java.util.OptionalLong;
 
 import com.google.common.annotations.VisibleForTesting;
 import org.apache.tuweni.bytes.Bytes;
@@ -113,7 +114,8 @@ public abstract class AbstractEstimateGas extends AbstractBlockParameterMethod {
     final var maybeStateOverrides = getAddressStateOverrideMap(requestContext);
     final var pendingBlockHeader = transactionSimulator.simulatePendingBlockHeader();
     final var minTxCost = getBlockchainQueries().getMinimumTransactionCost(pendingBlockHeader);
-    final var gasLimitUpperBound = calculateGasLimitUpperBound(callParameter, pendingBlockHeader);
+    final var gasLimitUpperBound =
+        calculateGasLimitUpperBound(callParameter, pendingBlockHeader, minTxCost);
     if (gasLimitUpperBound < minTxCost) {
       return errorResponse(
           requestContext, RpcErrorType.TRANSACTION_UPFRONT_GAS_COST_EXCEEDS_BALANCE);
@@ -151,7 +153,8 @@ public abstract class AbstractEstimateGas extends AbstractBlockParameterMethod {
     final var validationParams = getTransactionValidationParams(callParameter);
     final var maybeStateOverrides = getAddressStateOverrideMap(requestContext);
     final var minTxCost = getBlockchainQueries().getMinimumTransactionCost(blockHeader);
-    final var gasLimitUpperBound = calculateGasLimitUpperBound(callParameter, blockHeader);
+    final var gasLimitUpperBound =
+        calculateGasLimitUpperBound(callParameter, blockHeader, minTxCost);
     if (gasLimitUpperBound < minTxCost) {
       return errorResponse(
           requestContext, RpcErrorType.TRANSACTION_UPFRONT_GAS_COST_EXCEEDS_BALANCE);
@@ -292,12 +295,21 @@ public abstract class AbstractEstimateGas extends AbstractBlockParameterMethod {
   }
 
   private long calculateGasLimitUpperBound(
-      final CallParameter callParameters, final ProcessableBlockHeader blockHeader) {
+      final CallParameter callParameters,
+      final ProcessableBlockHeader blockHeader,
+      final long minTxCost) {
 
+    // A gas limit set in the call bounds the search as it bounds the transaction, also above the
+    // block gas limit, up to the RPC gas cap floored at the block gas limit. Without one, the
+    // search can reach the block gas limit.
+    final OptionalLong requestedGasLimit = callParameters.getGas();
+    final long gasLimit =
+        requestedGasLimit.isPresent() && requestedGasLimit.getAsLong() >= minTxCost
+            ? transactionSimulator.calculateSimulationGasCap(
+                blockHeader, requestedGasLimit, blockHeader.getGasLimit())
+            : blockHeader.getGasLimit();
     final var maxTxGasLimit =
-        Math.min(
-            getBlockchainQueries().getTransactionGasLimitCap(blockHeader),
-            blockHeader.getGasLimit());
+        Math.min(getBlockchainQueries().getTransactionGasLimitCap(blockHeader), gasLimit);
 
     if (callParameters.getSender().isPresent() && callParameters.getStrict().orElse(Boolean.TRUE)) {
       final var sender = callParameters.getSender().get();

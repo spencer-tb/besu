@@ -225,6 +225,32 @@ public class CallGasLimitsTest {
   }
 
   @Test
+  public void estimateIsBoundedByTheGasLimitOfTheCall() throws Exception {
+    // the call needs NEEDED_GAS, more than the gas limit it sets
+    error(
+        ethEstimateGas(ApiConfiguration.DEFAULT_GAS_CAP),
+        "eth_estimateGas",
+        atLatest(call(NEEDS_GAS, NEEDED_GAS / 2)));
+  }
+
+  @Test
+  public void estimateSearchReachesAGasLimitOfTheCallAboveTheBlockGasLimit() throws Exception {
+    // the two deployments need more than the block gas limit, and the call allows the RPC gas cap
+    final long gas =
+        estimate(
+            ApiConfiguration.DEFAULT_GAS_CAP,
+            "{\"from\":\""
+                + SENDER
+                + "\",\"gas\":\"0x"
+                + Long.toHexString(ApiConfiguration.DEFAULT_GAS_CAP)
+                + "\",\"input\":\""
+                + TWO_DEPLOYMENTS
+                + "\"}");
+
+    assertThat(gas).isBetween(BLOCK_GAS_LIMIT, ApiConfiguration.DEFAULT_GAS_CAP);
+  }
+
+  @Test
   public void callWithGasAboveTheCapGetsItUpToTheBlockGasLimit() throws Exception {
     final Object output =
         success(ethCall(LOW_GAS_CAP), "eth_call", atLatest(call(NEEDS_GAS, 20_000_000L)));
