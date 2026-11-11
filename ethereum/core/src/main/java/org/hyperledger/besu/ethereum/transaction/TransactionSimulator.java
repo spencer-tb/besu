@@ -631,6 +631,17 @@ public class TransactionSimulator {
                             UInt256.fromHexString(key), UInt256.fromHexString(value))));
   }
 
+  /**
+   * Returns the gas limit to simulate a call with. A call that omits its gas limit gets the block
+   * gas limit, bounded by the RPC gas cap. A call that sets one keeps it, but not above the RPC gas
+   * cap, which never limits it below the block gas limit: a transaction that fits in the block can
+   * be included, so it can also be simulated.
+   *
+   * @param blockHeader the header of the block the call runs in
+   * @param maybeUserProvidedGasLimit the gas limit of the call, if it sets one
+   * @param blockGasLimit the gas the block has for the call
+   * @return the gas limit to simulate the call with
+   */
   public long calculateSimulationGasCap(
       final ProcessableBlockHeader blockHeader,
       final OptionalLong maybeUserProvidedGasLimit,
@@ -639,12 +650,14 @@ public class TransactionSimulator {
 
     if (maybeUserProvidedGasLimit.isPresent()) {
       long userProvidedGasLimit = maybeUserProvidedGasLimit.getAsLong();
-      if (rpcGasCap > 0 && userProvidedGasLimit > rpcGasCap) {
+      final long gasCap = Math.max(rpcGasCap, blockGasLimit);
+      if (rpcGasCap > 0 && userProvidedGasLimit > gasCap) {
         LOG.trace(
-            "User provided gas limit {} is bigger than the value of rpc-gas-cap {}, setting simulation gas cap to the latter",
+            "User provided gas limit {} is bigger than both rpc-gas-cap {} and the block gas limit {}, setting simulation gas cap to the larger of the two",
             userProvidedGasLimit,
-            rpcGasCap);
-        simulationGasCap = rpcGasCap;
+            rpcGasCap,
+            blockGasLimit);
+        simulationGasCap = gasCap;
       } else {
         LOG.trace("Using provided gas limit {} set as simulation gas cap", userProvidedGasLimit);
         simulationGasCap = userProvidedGasLimit;

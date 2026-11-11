@@ -21,14 +21,21 @@ import org.hyperledger.besu.ethereum.api.ApiConfiguration;
 import org.hyperledger.besu.ethereum.api.ImmutableApiConfiguration;
 import org.hyperledger.besu.ethereum.api.jsonrpc.internal.JsonRpcRequest;
 import org.hyperledger.besu.ethereum.api.jsonrpc.internal.JsonRpcRequestContext;
+import org.hyperledger.besu.ethereum.api.jsonrpc.internal.response.JsonRpcError;
+import org.hyperledger.besu.ethereum.api.jsonrpc.internal.response.JsonRpcErrorResponse;
 import org.hyperledger.besu.ethereum.api.jsonrpc.internal.response.JsonRpcResponse;
 import org.hyperledger.besu.ethereum.api.jsonrpc.internal.response.JsonRpcSuccessResponse;
+import org.hyperledger.besu.ethereum.api.jsonrpc.internal.results.BlockStateCallResult;
+import org.hyperledger.besu.ethereum.api.jsonrpc.internal.results.CallProcessingResult;
 import org.hyperledger.besu.ethereum.api.query.BlockchainQueries;
 import org.hyperledger.besu.ethereum.core.ExecutionContextTestFixture;
 import org.hyperledger.besu.ethereum.core.MiningConfiguration;
 import org.hyperledger.besu.ethereum.transaction.TransactionSimulator;
+import org.hyperledger.besu.ethereum.transaction.exceptions.BlockStateCallError;
 import org.hyperledger.besu.metrics.noop.NoOpMetricsSystem;
 import org.hyperledger.besu.plugin.services.storage.DataStorageFormat;
+
+import java.util.List;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -50,6 +57,10 @@ public class CallGasLimitsTest {
   private static final long TX_MAX_GAS_LIMIT = 1L << 24;
   // the block gas limit of the genesis block, above TX_MAX_GAS_LIMIT
   private static final long BLOCK_GAS_LIMIT = 30_000_000L;
+  // an RPC gas cap below the block gas limit
+  private static final long LOW_GAS_CAP = 10_000_000L;
+  // gas that a call needs, above LOW_GAS_CAP and below TX_MAX_GAS_LIMIT
+  private static final long NEEDED_GAS = 12_000_000L;
 
   // Loops 3000 times, about 78,000 gas:
   //   PUSH2 3000 JUMPDEST PUSH1 1 SWAP1 SUB DUP1 PUSH1 3 JUMPI STOP
@@ -74,6 +85,14 @@ public class CallGasLimitsTest {
   private static final String STORE_CATCHER = "0x000000000000000000000000000000000000ca03";
   private static final String STORE_CATCHER_CODE =
       "0x6000600060006000600073" + STORER.substring(2) + "617530f160005260206000f3";
+  // Returns the gas left at entry if it is at least NEEDED_GAS, reverts otherwise:
+  //   GAS PUSH4 NEEDED_GAS DUP2 LT PUSH1 0x11 JUMPI PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN
+  //   JUMPDEST PUSH0 PUSH0 REVERT
+  private static final String NEEDS_GAS = "0x000000000000000000000000000000000000c0de";
+  private static final String NEEDS_GAS_CODE = "0x5a6300b71b0081106011575f5260205ff35b5f5ffd";
+  // Returns the gas left at entry: GAS PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN
+  private static final String GAS_AT_CALL = "0x000000000000000000000000000000000000c0df";
+  private static final String GAS_AT_CALL_CODE = "0x5a5f5260205ff3";
 
   private final ObjectMapper mapper = new ObjectMapper();
 
@@ -91,6 +110,8 @@ public class CallGasLimitsTest {
     putCode(alloc, PROBER, PROBER_CODE);
     putCode(alloc, STORER, STORER_CODE);
     putCode(alloc, STORE_CATCHER, STORE_CATCHER_CODE);
+    putCode(alloc, NEEDS_GAS, NEEDS_GAS_CODE);
+    putCode(alloc, GAS_AT_CALL, GAS_AT_CALL_CODE);
     fixture =
         ExecutionContextTestFixture.builder(GenesisConfig.fromConfig(genesis))
             .dataStorageFormat(DataStorageFormat.BONSAI)
@@ -129,6 +150,75 @@ public class CallGasLimitsTest {
     assertThat(gas).isLessThan(TX_MAX_GAS_LIMIT);
   }
 
+  @Test
+  public void callWithGasAboveTheCapGetsItUpToTheBlockGasLimit() throws Exception {
+    final Object output =
+        success(ethCall(LOW_GAS_CAP), "eth_call", atLatest(call(NEEDS_GAS, 20_000_000L)));
+
+    assertThat(word(output)).isGreaterThanOrEqualTo(NEEDED_GAS);
+  }
+
+  @Test
+  public void callWithGasAboveTheBlockGasLimitIsCappedAtTheBlockGasLimit() throws Exception {
+    final Object output =
+        success(ethCall(LOW_GAS_CAP), "eth_call", atLatest(call(GAS_AT_CALL, 1_000_000_000L)));
+
+    assertThat(word(output)).isLessThanOrEqualTo(BLOCK_GAS_LIMIT);
+  }
+
+  @Test
+  public void callWithoutGasKeepsTheCapAsDefault() throws Exception {
+    final Object output = success(ethCall(LOW_GAS_CAP), "eth_call", atLatest(call(GAS_AT_CALL)));
+
+    assertThat(word(output)).isLessThanOrEqualTo(LOW_GAS_CAP);
+  }
+
+  @Test
+  public void estimateSearchReachesTheBlockGasLimitAboveTheCap() throws Exception {
+    final long gas = estimate(LOW_GAS_CAP, call(NEEDS_GAS));
+
+    assertThat(gas).isBetween(NEEDED_GAS, BLOCK_GAS_LIMIT);
+  }
+
+  @Test
+  public void simulateCallWithGasAboveTheCapGetsItUpToTheBlockGasLimit() throws Exception {
+    final CallProcessingResult result =
+        simulatedCall(LOW_GAS_CAP, simulation("{}", call(NEEDS_GAS, 20_000_000L), false));
+
+    assertThat(result.getStatus()).isEqualTo("0x1");
+    assertThat(word(result.getReturnData())).isGreaterThanOrEqualTo(NEEDED_GAS);
+  }
+
+  @Test
+  public void simulateCallWithoutGasKeepsTheCapAsDefault() throws Exception {
+    final CallProcessingResult result =
+        simulatedCall(LOW_GAS_CAP, simulation("{}", call(GAS_AT_CALL), false));
+
+    assertThat(result.getStatus()).isEqualTo("0x1");
+    assertThat(word(result.getReturnData())).isLessThanOrEqualTo(LOW_GAS_CAP);
+  }
+
+  @Test
+  public void simulateBlockOverrideOfTheGasLimitDoesNotRaiseTheCap() throws Exception {
+    final JsonRpcError error =
+        error(
+            ethSimulateV1(LOW_GAS_CAP),
+            "eth_simulateV1",
+            simulation("{\"gasLimit\":\"0x3b9aca00\"}", call(GAS_AT_CALL, 40_000_000L), false));
+
+    assertThat(error.getCode()).isEqualTo(BlockStateCallError.BLOCK_GAS_LIMIT_EXCEEDED.getCode());
+  }
+
+  private CallProcessingResult simulatedCall(final long gasCap, final String simulation)
+      throws Exception {
+    final Object result = success(ethSimulateV1(gasCap), "eth_simulateV1", simulation);
+    @SuppressWarnings("unchecked")
+    final List<BlockStateCallResult> blocks = (List<BlockStateCallResult>) result;
+    assertThat(blocks).hasSize(1);
+    assertThat(blocks.get(0).getTransactionProcessingResults()).hasSize(1);
+    return blocks.get(0).getTransactionProcessingResults().get(0);
+  }
+
   private long estimate(final long gasCap, final String call) throws Exception {
     final Object result = success(ethEstimateGas(gasCap), "eth_estimateGas", atLatest(call));
     return Long.decode((String) result);
@@ -140,6 +230,16 @@ public class CallGasLimitsTest {
 
   private EthCall ethCall(final long gasCap) {
     return new EthCall(blockchainQueries, transactionSimulator(gasCap), new NoOpMetricsSystem());
+  }
+
+  private EthSimulateV1 ethSimulateV1(final long gasCap) {
+    return new EthSimulateV1(
+        null,
+        blockchainQueries,
+        fixture.getProtocolSchedule(),
+        transactionSimulator(gasCap),
+        MiningConfiguration.MINING_DISABLED,
+        apiConfig(gasCap));
   }
 
   private TransactionSimulator transactionSimulator(final long gasCap) {
@@ -182,6 +282,18 @@ public class CallGasLimitsTest {
     return call + ",\"latest\"";
   }
 
+  private static String simulation(
+      final String blockOverrides, final String call, final boolean validation) {
+    return atLatest(
+        "{\"blockStateCalls\":[{\"blockOverrides\":"
+            + blockOverrides
+            + ",\"calls\":["
+            + call
+            + "]}],\"validation\":"
+            + validation
+            + "}");
+  }
+
   private static long word(final Object output) {
     return UInt256.fromBytes(Bytes.fromHexString((String) output)).toLong();
   }
@@ -191,6 +303,13 @@ public class CallGasLimitsTest {
     final JsonRpcResponse response = method.response(request(name, params));
     assertThat(response).isInstanceOf(JsonRpcSuccessResponse.class);
     return ((JsonRpcSuccessResponse) response).getResult();
+  }
+
+  private static JsonRpcError error(
+      final JsonRpcMethod method, final String name, final String params) throws Exception {
+    final JsonRpcResponse response = method.response(request(name, params));
+    assertThat(response).isInstanceOf(JsonRpcErrorResponse.class);
+    return ((JsonRpcErrorResponse) response).getError();
   }
 
   private static JsonRpcRequestContext request(final String name, final String params)

@@ -106,6 +106,28 @@ public class BlockStateCallSimulationResultTest {
   }
 
   @Test
+  public void remainingDefaultGasStopsAtTheDefaultGasBudget() {
+    BlockStateCallSimulationResult result =
+        resultWith(BlockGasAccountingStrategy.AMSTERDAM, 100_000_000L, 60_000_000L, 20_000_000L);
+
+    result.add(
+        call(15_000_000L, 15_000_000L, 0L),
+        mock(MutableWorldState.class),
+        OperationTracer.NO_TRACING);
+
+    assertThat(result.getRemainingGas()).isEqualTo(45_000_000L);
+    assertThat(result.getRemainingDefaultGas()).isEqualTo(5_000_000L);
+
+    result.add(
+        call(10_000_000L, 10_000_000L, 0L),
+        mock(MutableWorldState.class),
+        OperationTracer.NO_TRACING);
+
+    assertThat(result.getRemainingGas()).isEqualTo(35_000_000L);
+    assertThat(result.getRemainingDefaultGas()).isZero();
+  }
+
+  @Test
   public void frontierUsesReceiptGasForBothValues() {
     BlockStateCallSimulationResult result =
         resultWith(BlockGasAccountingStrategy.FRONTIER, 30_000_000L);
@@ -132,6 +154,24 @@ public class BlockStateCallSimulationResultTest {
       final long blockGasLimit,
       final long gasBudget,
       final boolean allowExceedingExecutionGasLimit) {
+    return resultWith(
+        strategy, blockGasLimit, gasBudget, gasBudget, allowExceedingExecutionGasLimit);
+  }
+
+  private static BlockStateCallSimulationResult resultWith(
+      final BlockGasAccountingStrategy strategy,
+      final long blockGasLimit,
+      final long gasBudget,
+      final long defaultGasBudget) {
+    return resultWith(strategy, blockGasLimit, gasBudget, defaultGasBudget, false);
+  }
+
+  private static BlockStateCallSimulationResult resultWith(
+      final BlockGasAccountingStrategy strategy,
+      final long blockGasLimit,
+      final long gasBudget,
+      final long defaultGasBudget,
+      final boolean allowExceedingExecutionGasLimit) {
     ProtocolSpec protocolSpec = mock(ProtocolSpec.class);
     AbstractBlockProcessor.TransactionReceiptFactory receiptFactory =
         mock(AbstractBlockProcessor.TransactionReceiptFactory.class);
@@ -146,7 +186,7 @@ public class BlockStateCallSimulationResultTest {
     when(protocolSpec.getBlockGasAccountingStrategy()).thenReturn(strategy);
     when(protocolSpec.getGasCalculator()).thenReturn(gasCalculator);
     return new BlockStateCallSimulationResult(
-        protocolSpec, blockGasLimit, gasBudget, allowExceedingExecutionGasLimit);
+        protocolSpec, blockGasLimit, gasBudget, defaultGasBudget, allowExceedingExecutionGasLimit);
   }
 
   private static TransactionSimulatorResult call(
