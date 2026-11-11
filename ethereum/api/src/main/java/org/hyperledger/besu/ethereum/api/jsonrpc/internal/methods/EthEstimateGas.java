@@ -122,10 +122,13 @@ public class EthEstimateGas extends AbstractEstimateGas {
 
     var optimisticGasLimit = processEstimateGas(result);
 
-    if (isSufficient(simulationFunction, callParams, optimisticGasLimit, allowedFailedCalls)) {
-      high = optimisticGasLimit;
-    } else {
-      low = optimisticGasLimit;
+    // a limit at or above the upper bound tells nothing, and must not become the estimate
+    if (optimisticGasLimit < high) {
+      if (isSufficient(simulationFunction, callParams, optimisticGasLimit, allowedFailedCalls)) {
+        high = optimisticGasLimit;
+      } else {
+        low = optimisticGasLimit;
+      }
     }
 
     while (low + 1 < high) {

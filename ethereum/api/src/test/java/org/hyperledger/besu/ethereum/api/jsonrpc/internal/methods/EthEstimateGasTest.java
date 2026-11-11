@@ -667,6 +667,26 @@ public class EthEstimateGasTest {
   }
 
   @Test
+  public void shouldNotReturnMoreThanTheUpperBoundWhenTheOptimisticGasLimitIsAboveIt() {
+    // the gas used at the upper bound is so close to it that the optimistic limit is above it
+    final long gasUsed = BLOCK_GAS_LIMIT - 1_000L;
+    final long optimisticGasLimit = (long) ((gasUsed + 2_300L) * (64D / 63D));
+    mockSimulationAtGasLimit(MIN_TX_GAS_COST, false, 0L);
+    mockSimulationAtGasLimit(BLOCK_GAS_LIMIT, true, gasUsed);
+    mockSimulationAtGasLimit(gasUsed, false, 0L);
+    mockSimulationAtGasLimit(optimisticGasLimit, true, gasUsed);
+
+    final JsonRpcRequestContext request =
+        ethEstimateGasRequest(defaultLegacyTransactionCallParameter(Wei.ZERO));
+
+    final JsonRpcResponse expectedResponse =
+        new JsonRpcSuccessResponse(null, Quantity.create(BLOCK_GAS_LIMIT));
+
+    assertThat(optimisticGasLimit).isGreaterThan(BLOCK_GAS_LIMIT);
+    assertThat(method.response(request)).usingRecursiveComparison().isEqualTo(expectedResponse);
+  }
+
+  @Test
   public void shouldReturnMinTxCostForPlainTransferWithSingleSimulation() {
     mockSimulationAtGasLimit(MIN_TX_GAS_COST, true, MIN_TX_GAS_COST);
 
