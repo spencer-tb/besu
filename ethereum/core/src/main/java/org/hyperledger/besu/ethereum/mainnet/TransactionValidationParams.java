@@ -44,9 +44,17 @@ public interface TransactionValidationParams {
       ImmutableTransactionValidationParams.of(
           true, false, false, false, false, true, true, false, false, false, false, true);
 
-  TransactionValidationParams transactionSimulatorAllowUnderpricedAndFutureNonceParams =
+  // eth_estimateGas: as the transaction simulator, but the EIP-8037 cap on the intrinsic and
+  // calldata floor cost applies, since the transaction is estimated as it executes in a block.
+  TransactionValidationParams estimateGasAllowUnderpricedAndFutureNonceParams =
       ImmutableTransactionValidationParams.of(
-          true, false, true, false, false, true, true, false, false, false, false, true);
+          true, false, true, false, false, true, true, false, false, false, false, false);
+
+  // eth_estimateGas without strict mode: as estimateGasAllowUnderpricedAndFutureNonceParams, but
+  // the sender's balance need not cover the gas fees.
+  TransactionValidationParams estimateGasAllowExceedingBalanceAndFutureNonceParams =
+      ImmutableTransactionValidationParams.of(
+          true, true, false, false, false, true, true, false, false, false, false, false);
 
   TransactionValidationParams transactionSimulatorAllowExceedingBalanceParams =
       ImmutableTransactionValidationParams.of(
@@ -55,6 +63,19 @@ public interface TransactionValidationParams {
   TransactionValidationParams transactionSimulatorAllowExceedingBalanceAndFutureNonceParams =
       ImmutableTransactionValidationParams.of(
           true, true, false, false, false, true, true, false, false, false, false, true);
+
+  // eth_call: as transactionSimulatorParamsAllowFutureNonce, but after Amsterdam the whole gas
+  // limit is available as execution gas (EIP-8037), so a read-only call can need more execution
+  // than a transaction can have.
+  TransactionValidationParams callSimulatorAllowFutureNonceParams =
+      ImmutableTransactionValidationParams.of(
+          true, false, false, false, false, true, true, false, false, false, true, true);
+
+  // eth_call: as transactionSimulatorAllowExceedingBalanceAndFutureNonceParams, with the whole gas
+  // limit available as execution gas after Amsterdam (EIP-8037).
+  TransactionValidationParams callSimulatorAllowExceedingBalanceAndFutureNonceParams =
+      ImmutableTransactionValidationParams.of(
+          true, true, false, false, false, true, true, false, false, false, true, true);
 
   // eth_simulateV1 non-strict: allows exceeding balance and future nonces, and preserves
   // caller-provided gas pricing so that gas fees are actually charged during simulation.
@@ -176,8 +197,22 @@ public interface TransactionValidationParams {
     return transactionSimulatorParamsAllowFutureNonce;
   }
 
-  static TransactionValidationParams transactionSimulatorAllowUnderpricedAndFutureNonce() {
-    return transactionSimulatorAllowUnderpricedAndFutureNonceParams;
+  /**
+   * Returns validation params for eth_estimateGas in strict mode. Underpriced gas and future nonces
+   * are allowed, and after Amsterdam the intrinsic and calldata floor cost must stay within
+   * TX_MAX_GAS_LIMIT, as in a block (EIP-8037).
+   */
+  static TransactionValidationParams estimateGasAllowUnderpricedAndFutureNonce() {
+    return estimateGasAllowUnderpricedAndFutureNonceParams;
+  }
+
+  /**
+   * Returns validation params for eth_estimateGas without strict mode. The sender's balance need
+   * not cover the gas fees, future nonces are allowed, and after Amsterdam the intrinsic and
+   * calldata floor cost must stay within TX_MAX_GAS_LIMIT, as in a block (EIP-8037).
+   */
+  static TransactionValidationParams estimateGasAllowExceedingBalanceAndFutureNonce() {
+    return estimateGasAllowExceedingBalanceAndFutureNonceParams;
   }
 
   static TransactionValidationParams transactionSimulatorAllowExceedingBalance() {
@@ -186,6 +221,24 @@ public interface TransactionValidationParams {
 
   static TransactionValidationParams transactionSimulatorAllowExceedingBalanceAndFutureNonce() {
     return transactionSimulatorAllowExceedingBalanceAndFutureNonceParams;
+  }
+
+  /**
+   * Returns validation params for eth_call that validates the caller's gas pricing. Future nonces
+   * are allowed, and after Amsterdam the whole gas limit is available as execution gas instead of
+   * capping it at TX_MAX_GAS_LIMIT (EIP-8037).
+   */
+  static TransactionValidationParams callSimulatorAllowFutureNonce() {
+    return callSimulatorAllowFutureNonceParams;
+  }
+
+  /**
+   * Returns validation params for eth_call without gas fees. The sender's balance need not cover
+   * them, future nonces are allowed, and after Amsterdam the whole gas limit is available as
+   * execution gas instead of capping it at TX_MAX_GAS_LIMIT (EIP-8037).
+   */
+  static TransactionValidationParams callSimulatorAllowExceedingBalanceAndFutureNonce() {
+    return callSimulatorAllowExceedingBalanceAndFutureNonceParams;
   }
 
   /**

@@ -46,6 +46,7 @@ public class BlockStateCallSimulationResult {
   private final AbstractBlockProcessor.TransactionReceiptFactory transactionReceiptFactory;
   private final long blockGasLimit;
   private final long gasBudget;
+  private final long defaultGasBudget;
   private long blobCount = 0;
   private final GasCalculator gasCalculator;
   private final BlockGasAccountingStrategy blockGasAccountingStrategy;
@@ -57,6 +58,8 @@ public class BlockStateCallSimulationResult {
    * @param protocolSpec the protocol spec of the block
    * @param blockGasLimit the gas limit of the block header
    * @param gasBudget the gas that the calls of the block may use in total, as receipt gas
+   * @param defaultGasBudget the gas budget, at most {@code gasBudget}, that bounds the gas limit of
+   *     a call that omits it. The gas of every call counts against it.
    * @param allowExceedingExecutionGasLimit whether the calls may use their whole gas limit as
    *     execution gas
    */
@@ -64,10 +67,12 @@ public class BlockStateCallSimulationResult {
       final ProtocolSpec protocolSpec,
       final long blockGasLimit,
       final long gasBudget,
+      final long defaultGasBudget,
       final boolean allowExceedingExecutionGasLimit) {
     this.transactionReceiptFactory = protocolSpec.getTransactionReceiptFactory();
     this.blockGasLimit = blockGasLimit;
     this.gasBudget = gasBudget;
+    this.defaultGasBudget = defaultGasBudget;
     this.gasCalculator = protocolSpec.getGasCalculator();
     this.blockGasAccountingStrategy = protocolSpec.getBlockGasAccountingStrategy();
     this.transactionExecutionGasLimit =
@@ -83,18 +88,36 @@ public class BlockStateCallSimulationResult {
    * @return the remaining gas of the block
    */
   public long getRemainingGas() {
+    return Math.min(getRemainingBlockGas(), Math.max(gasBudget - cumulativeGasUsed, 0));
+  }
+
+  /**
+   * Returns the gas limit that a call which omits its gas limit gets: the largest gas limit that
+   * the block can still include, bounded by the remaining default gas budget.
+   *
+   * @return the default gas limit of the next call
+   */
+  public long getRemainingDefaultGas() {
+    return Math.min(getRemainingBlockGas(), Math.max(defaultGasBudget - cumulativeGasUsed, 0));
+  }
+
+  /**
+   * Returns the largest gas limit that the block can still include, as the fork's block gas
+   * accounting checks it, whatever the remaining gas budget.
+   *
+   * @return the remaining gas of the block
+   */
+  public long getRemainingBlockGas() {
     final long remainingExecutionGas = Math.max(blockGasLimit - cumulativeExecutionGasUsed, 0);
     final long remainingStateGas = Math.max(blockGasLimit - cumulativeStateGasUsed, 0);
-    final long remainingBlockGas =
-        blockGasAccountingStrategy.hasBlockCapacity(
-                remainingStateGas,
-                transactionExecutionGasLimit,
-                cumulativeExecutionGasUsed,
-                cumulativeStateGasUsed,
-                blockGasLimit)
-            ? remainingStateGas
-            : Math.min(remainingExecutionGas, remainingStateGas);
-    return Math.min(remainingBlockGas, Math.max(gasBudget - cumulativeGasUsed, 0));
+    return blockGasAccountingStrategy.hasBlockCapacity(
+            remainingStateGas,
+            transactionExecutionGasLimit,
+            cumulativeExecutionGasUsed,
+            cumulativeStateGasUsed,
+            blockGasLimit)
+        ? remainingStateGas
+        : Math.min(remainingExecutionGas, remainingStateGas);
   }
 
   public long getCumulativeGasUsed() {

@@ -86,6 +86,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
@@ -720,7 +721,9 @@ public class TransactionSimulatorTest extends TrustedSetupClassLoaderExtension {
     final CallParameter callParameter =
         eip1559TransactionCallParameterBuilder().gas(RPC_GAS_CAP + 1).build();
 
-    mockBlockchainAndWorldState(callParameter);
+    // the block gas limit is below the cap, so the cap applies
+    final var blockHeader = mockBlockHeader(Hash.ZERO, 1L, Wei.ONE, RPC_GAS_CAP / 2);
+    mockBlockchainAndWorldState(callParameter, blockHeader);
 
     final Transaction expectedTransaction =
         Transaction.builder()
@@ -744,6 +747,45 @@ public class TransactionSimulatorTest extends TrustedSetupClassLoaderExtension {
         callParameter, TransactionValidationParams.transactionSimulator(), NO_TRACING, 1L);
 
     // expect overwritten transaction to be processed
+    verifyTransactionWasProcessed(expectedTransaction);
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    // above the cap but within the block gas limit: not capped
+    "500001, 500001",
+    "30000000, 30000000",
+    // above the block gas limit too: capped at the block gas limit
+    "30000001, 30000000"
+  })
+  public void shouldNotCapGasLimitBelowBlockGasLimit(
+      final long providedGasLimit, final long expectedGasLimit) {
+    final CallParameter callParameter =
+        eip1559TransactionCallParameterBuilder().gas(providedGasLimit).build();
+
+    final var blockHeader = mockBlockchainAndWorldState(callParameter);
+    assertThat(blockHeader.getGasLimit()).isEqualTo(DEFAULT_BLOCK_GAS_LIMIT);
+
+    final Transaction expectedTransaction =
+        Transaction.builder()
+            .type(TransactionType.EIP1559)
+            .chainId(BigInteger.ONE)
+            .nonce(1L)
+            .gasLimit(expectedGasLimit)
+            .maxFeePerGas(callParameter.getMaxFeePerGas().orElseThrow())
+            .maxPriorityFeePerGas(callParameter.getMaxPriorityFeePerGas().orElseThrow())
+            .to(callParameter.getTo().orElseThrow())
+            .sender(callParameter.getSender().orElseThrow())
+            .value(callParameter.getValue().orElseThrow())
+            .payload(callParameter.getPayload().orElseThrow())
+            .signature(FAKE_SIGNATURE)
+            .build();
+
+    mockProtocolSpecForProcessWithWorldUpdater();
+
+    cappedTransactionSimulator.process(
+        callParameter, TransactionValidationParams.transactionSimulator(), NO_TRACING, 1L);
+
     verifyTransactionWasProcessed(expectedTransaction);
   }
 

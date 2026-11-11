@@ -845,6 +845,21 @@ public class BlockchainQueries {
   }
 
   /**
+   * Returns the cap on the execution gas of a transaction. From Amsterdam (EIP-8037) it is the
+   * EIP-7825 value (2^24), and gas above it can only be spent as state gas.
+   *
+   * @param header the header of the block the transaction runs in
+   * @return the transaction execution gas limit, or {@link Long#MAX_VALUE} before Amsterdam
+   */
+  public long getTransactionExecutionGasLimit(final ProcessableBlockHeader header) {
+    return protocolSchedule
+        .getByBlockHeader(header)
+        .getGasCalculator()
+        .stateGasCostCalculator()
+        .transactionExecutionGasLimit();
+  }
+
+  /**
    * Calculates the blob gas price for data in a transaction.
    *
    * @param transaction the transaction to calculate the gas price for

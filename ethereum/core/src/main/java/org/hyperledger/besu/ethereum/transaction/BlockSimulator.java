@@ -76,6 +76,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.function.BiFunction;
 import java.util.function.Supplier;
 
@@ -214,6 +215,7 @@ public class BlockSimulator {
               simulationParameter::getFakeSignature,
               blockHashCache,
               simulationCumulativeGasUsed,
+              blockHeader.getGasLimit(),
               operationTracer);
       results.add(result);
       BlockHeader resultBlockHeader = result.getBlock().getHeader();
@@ -240,6 +242,7 @@ public class BlockSimulator {
    * @param baseBlockHeader The block header for the simulation.
    * @param blockStateCall The BlockStateCall to process.
    * @param ws The MutableWorldState to use for the simulation.
+   * @param baseBlockGasLimit The gas limit of the block the simulation starts from.
    * @param operationTracer The operation tracer to use
    * @return A BlockSimulationResult from processing the BlockStateCall.
    */
@@ -254,6 +257,7 @@ public class BlockSimulator {
       final Supplier<SECPSignature> signatureSupplier,
       final Map<Long, Hash> blockHashCache,
       final long simulationCumulativeGasUsed,
+      final long baseBlockGasLimit,
       final OperationTracer operationTracer) {
     final boolean shouldValidate = validationParams != NON_STRICT_PARAMS;
 
@@ -340,6 +344,7 @@ public class BlockSimulator {
             blockHashLookup,
             signatureSupplier,
             simulationCumulativeGasUsed,
+            baseBlockGasLimit,
             blockAccessListBuilder,
             operationTracer);
 
@@ -428,6 +433,7 @@ public class BlockSimulator {
       final BlockHashLookup blockHashLookup,
       final Supplier<SECPSignature> signatureSupplier,
       final long simulationCumulativeGasUsed,
+      final long baseBlockGasLimit,
       final Optional<BlockAccessListBuilder> blockAccessListBuilder,
       final OperationTracer operationTracer) {
 
@@ -435,6 +441,7 @@ public class BlockSimulator {
         new BlockStateCallSimulationResult(
             protocolSpec,
             blockHeader.getGasLimit(),
+            remainingRpcGas(simulationCumulativeGasUsed, baseBlockGasLimit),
             remainingRpcGas(simulationCumulativeGasUsed),
             validationParams.isAllowExceedingExecutionGasLimit());
 
@@ -469,13 +476,21 @@ public class BlockSimulator {
         }
       }
 
-      if (callParameter.getGas().isPresent()
-          && callParameter.getGas().getAsLong()
-              > blockStateCallSimulationResult.getRemainingGas()) {
+      // A call that sets its gas limit must fit in the block, and is clamped to a gas budget
+      // floored at the gas limit of the block the simulation starts from. A call that omits it
+      // gets a default that the RPC gas cap bounds.
+      final OptionalLong requestedGasLimit = callParameter.getGas();
+      if (requestedGasLimit.isPresent()
+          && requestedGasLimit.getAsLong()
+              > blockStateCallSimulationResult.getRemainingBlockGas()) {
         throw new BlockStateCallException(
             BlockStateCallError.BLOCK_GAS_LIMIT_EXCEEDED.getMessage(),
             BlockStateCallError.BLOCK_GAS_LIMIT_EXCEEDED);
       }
+      final long remainingGas =
+          requestedGasLimit.isPresent()
+              ? blockStateCallSimulationResult.getRemainingGas()
+              : blockStateCallSimulationResult.getRemainingDefaultGas();
 
       if (validationParams.isAllowFutureNonce()) {
         final Address sender = callParameter.getSender().orElse(TransactionSimulator.DEFAULT_FROM);
@@ -492,8 +507,10 @@ public class BlockSimulator {
       long gasLimit =
           transactionSimulator.calculateSimulationGasCap(
               blockHeader,
-              callParameter.getGas(),
-              blockStateCallSimulationResult.getRemainingGas());
+              requestedGasLimit.isPresent()
+                  ? OptionalLong.of(Math.min(requestedGasLimit.getAsLong(), remainingGas))
+                  : requestedGasLimit,
+              remainingGas);
 
       // When enforcing consensus caps (block-building mode), bound the auto-filled gas limit to
       // txGasLimitCap (EIP-7825/EIP-8037) so the built transaction passes validation. For
@@ -897,5 +914,22 @@ public class BlockSimulator {
    */
   public long remainingRpcGas(final long simulationCumulativeGasUsed) {
     return rpcGasCap > 0 ? Math.max(rpcGasCap - simulationCumulativeGasUsed, 0) : Long.MAX_VALUE;
+  }
+
+  /**
+   * Returns the gas that the calls of the simulation which set their gas limit may still use. The
+   * RPC gas cap never limits them below the gas limit of the block the simulation starts from, so a
+   * transaction that fits in that block can be simulated, and a block override of the gas limit
+   * does not raise the cap.
+   *
+   * @param simulationCumulativeGasUsed the receipt gas that earlier blocks of the simulation used
+   * @param baseBlockGasLimit the gas limit of the block the simulation starts from
+   * @return the remaining gas, or {@link Long#MAX_VALUE} without an RPC gas cap
+   */
+  public long remainingRpcGas(
+      final long simulationCumulativeGasUsed, final long baseBlockGasLimit) {
+    return rpcGasCap > 0
+        ? Math.max(Math.max(rpcGasCap, baseBlockGasLimit) - simulationCumulativeGasUsed, 0)
+        : Long.MAX_VALUE;
   }
 }

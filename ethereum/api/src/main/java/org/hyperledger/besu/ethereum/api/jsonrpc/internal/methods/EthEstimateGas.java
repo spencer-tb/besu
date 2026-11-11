@@ -25,6 +25,9 @@ import org.hyperledger.besu.ethereum.core.ProcessableBlockHeader;
 import org.hyperledger.besu.ethereum.transaction.CallParameter;
 import org.hyperledger.besu.ethereum.transaction.TransactionSimulator;
 import org.hyperledger.besu.ethereum.transaction.TransactionSimulatorResult;
+import org.hyperledger.besu.evm.frame.MessageFrame;
+import org.hyperledger.besu.evm.operation.Operation;
+import org.hyperledger.besu.evm.operation.Operation.OperationResult;
 import org.hyperledger.besu.evm.tracing.OperationTracer;
 
 import java.util.Optional;
@@ -72,15 +75,44 @@ public class EthEstimateGas extends AbstractEstimateGas {
       return Quantity.create(minTxCost);
     }
 
+    final long executionGasLimit =
+        getBlockchainQueries().getTransactionExecutionGasLimit(blockHeader);
+    // Before EIP-8037, a creation that fails its depth, balance or nonce check counts as a failed
+    // nested call, as a call does. From EIP-8037 the creating frame runs those checks before the
+    // creation starts, so they do not count.
+    final boolean countsCreationPrechecks = executionGasLimit == Long.MAX_VALUE;
+    final FailedCallCounter failedCalls = new FailedCallCounter(countsCreationPrechecks);
     final var maybeResult =
-        simulationFunction.simulate(
-            overrideGasLimit(callParams, gasLimitUpperBound), OperationTracer.NO_TRACING);
+        simulationFunction.simulate(overrideGasLimit(callParams, gasLimitUpperBound), failedCalls);
 
     final Optional<JsonRpcErrorResponse> maybeErrorResponse =
         validateSimulationResult(requestContext, maybeResult);
     if (maybeErrorResponse.isPresent()) {
       return maybeErrorResponse.get();
     }
+
+    // A gas limit only counts as sufficient if no more nested calls fail than in a reference
+    // execution. Otherwise the search can settle on a limit where an inner call runs out of gas,
+    // the caller catches the failure and the transaction succeeds while doing something else than
+    // intended.
+    //
+    // After Amsterdam (EIP-8037), gas above the transaction execution gas limit only feeds the
+    // state gas reservoir, so a gas limit at or below it runs without a reservoir. A call that
+    // completes an inner call only with a reservoir would otherwise be sized past that limit, so
+    // such gas limits are held to the execution at the limit when it succeeds. Gas limits above
+    // it are held to the execution at the upper bound.
+    final int failedCallsAtUpperBound = failedCalls.count();
+    final FailedCallAllowance allowance =
+        new FailedCallAllowance(
+            countsCreationPrechecks,
+            executionGasLimit,
+            executionGasLimit < gasLimitUpperBound
+                ? Math.max(
+                    failedCallsAtUpperBound,
+                    failedCallsIfSuccessful(
+                        simulationFunction, callParams, executionGasLimit, countsCreationPrechecks))
+                : failedCallsAtUpperBound,
+            failedCallsAtUpperBound);
 
     final var result = maybeResult.get();
     final long estimateGasUsed = result.result().getEstimateGasUsedByTransaction();
@@ -91,10 +123,7 @@ public class EthEstimateGas extends AbstractEstimateGas {
 
     if (isPlainValueTransfer(callParams)) {
       // gas used at a high limit is not always a sufficient limit (63/64 rule), so confirm it
-      final var exactResult =
-          simulationFunction.simulate(
-              overrideGasLimit(callParams, estimateGasUsed), OperationTracer.NO_TRACING);
-      if (exactResult.isPresent() && exactResult.get().isSuccessful()) {
+      if (isSufficient(simulationFunction, callParams, estimateGasUsed, allowance)) {
         return Quantity.create(estimateGasUsed);
       }
       low = estimateGasUsed;
@@ -102,14 +131,13 @@ public class EthEstimateGas extends AbstractEstimateGas {
 
     var optimisticGasLimit = processEstimateGas(result);
 
-    final var optimisticResult =
-        simulationFunction.simulate(
-            overrideGasLimit(callParams, optimisticGasLimit), OperationTracer.NO_TRACING);
-
-    if (optimisticResult.isPresent() && optimisticResult.get().isSuccessful()) {
-      high = optimisticGasLimit;
-    } else {
-      low = optimisticGasLimit;
+    // a limit at or above the upper bound tells nothing, and must not become the estimate
+    if (optimisticGasLimit < high) {
+      if (isSufficient(simulationFunction, callParams, optimisticGasLimit, allowance)) {
+        high = optimisticGasLimit;
+      } else {
+        low = optimisticGasLimit;
+      }
     }
 
     while (low + 1 < high) {
@@ -119,18 +147,46 @@ public class EthEstimateGas extends AbstractEstimateGas {
         break;
       }
       mid = (low + high) / 2;
-      var binarySearchResult =
-          simulationFunction.simulate(
-              overrideGasLimit(callParams, mid), OperationTracer.NO_TRACING);
-
-      if (binarySearchResult.isEmpty() || !binarySearchResult.get().isSuccessful()) {
-        low = mid;
-      } else {
+      if (isSufficient(simulationFunction, callParams, mid, allowance)) {
         high = mid;
+      } else {
+        low = mid;
       }
     }
 
     return Quantity.create(high);
+  }
+
+  /**
+   * Returns whether the transaction succeeds with the given gas limit, without more of its nested
+   * calls failing than allowed for that gas limit.
+   */
+  private boolean isSufficient(
+      final TransactionSimulationFunction simulationFunction,
+      final CallParameter callParams,
+      final long gasLimit,
+      final FailedCallAllowance allowance) {
+    final FailedCallCounter failedCalls = allowance.newCounter();
+    final var result =
+        simulationFunction.simulate(overrideGasLimit(callParams, gasLimit), failedCalls);
+    return result.isPresent()
+        && result.get().isSuccessful()
+        && allowance.allows(gasLimit, failedCalls.count());
+  }
+
+  /**
+   * Returns how many nested calls of the transaction fail with the given gas limit, or zero if the
+   * transaction itself fails.
+   */
+  private int failedCallsIfSuccessful(
+      final TransactionSimulationFunction simulationFunction,
+      final CallParameter callParams,
+      final long gasLimit,
+      final boolean countsCreationPrechecks) {
+    final FailedCallCounter failedCalls = new FailedCallCounter(countsCreationPrechecks);
+    final var result =
+        simulationFunction.simulate(overrideGasLimit(callParams, gasLimit), failedCalls);
+    return result.isPresent() && result.get().isSuccessful() ? failedCalls.count() : 0;
   }
 
   private Optional<JsonRpcErrorResponse> validateSimulationResult(
@@ -161,5 +217,74 @@ public class EthEstimateGas extends AbstractEstimateGas {
 
     // no more than 64/63 of the remaining gas can be passed to the sub calls
     return ((long) ((gasUsedByTransaction + CALL_STIPEND) * SUB_CALL_REMAINING_GAS_RATIO));
+  }
+
+  /**
+   * How many nested calls of the transaction may fail at a gas limit, and whether creations that
+   * fail their checks before they start count.
+   */
+  private record FailedCallAllowance(
+      boolean countsCreationPrechecks,
+      long executionGasLimit,
+      int upToExecutionGasLimit,
+      int aboveExecutionGasLimit) {
+
+    FailedCallCounter newCounter() {
+      return new FailedCallCounter(countsCreationPrechecks);
+    }
+
+    boolean allows(final long gasLimit, final int failedCalls) {
+      return failedCalls
+          <= (gasLimit <= executionGasLimit ? upToExecutionGasLimit : aboveExecutionGasLimit);
+    }
+  }
+
+  /**
+   * Counts the nested calls and creations of a transaction that fail, reverts included, and the
+   * calls that fail their balance or depth check before they start, as well as such creations if
+   * asked to. The EVM calls the per-operation hook that sees those checks for any enabled tracer,
+   * except EVM v2, which this tracer lets keep its untraced loop, so on EVM v2 only the failed
+   * frames are counted.
+   */
+  private static final class FailedCallCounter implements OperationTracer {
+    private static final int CREATE = 0xF0;
+    private static final int CREATE2 = 0xF5;
+
+    private final boolean countsCreationPrechecks;
+    private int failedCalls;
+
+    FailedCallCounter(final boolean countsCreationPrechecks) {
+      this.countsCreationPrechecks = countsCreationPrechecks;
+    }
+
+    @Override
+    public boolean tracesOperations() {
+      return false;
+    }
+
+    @Override
+    public void tracePostExecution(
+        final MessageFrame frame, final OperationResult operationResult) {
+      if (operationResult.getSoftFailureReason().isPresent()
+          && (countsCreationPrechecks || !isCreation(frame.getCurrentOperation()))) {
+        failedCalls++;
+      }
+    }
+
+    private static boolean isCreation(final Operation operation) {
+      return operation != null
+          && (operation.getOpcode() == CREATE || operation.getOpcode() == CREATE2);
+    }
+
+    @Override
+    public void traceContextExit(final MessageFrame frame) {
+      if (frame.getDepth() > 0 && frame.getState() == MessageFrame.State.COMPLETED_FAILED) {
+        failedCalls++;
+      }
+    }
+
+    int count() {
+      return failedCalls;
+    }
   }
 }

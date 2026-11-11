@@ -625,6 +625,7 @@ public class EthCallTest {
             .from(TransactionValidationParams.transactionSimulator())
             .isAllowExceedingBalance(isAllowedExceedingBalance)
             .isAllowFutureNonce(true)
+            .isAllowExceedingExecutionGasLimit(true)
             .build();
 
     verify(transactionSimulator)

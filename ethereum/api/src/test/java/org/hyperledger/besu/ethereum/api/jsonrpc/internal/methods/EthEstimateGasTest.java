@@ -52,6 +52,10 @@ import org.hyperledger.besu.ethereum.transaction.TransactionInvalidReason;
 import org.hyperledger.besu.ethereum.transaction.TransactionSimulator;
 import org.hyperledger.besu.ethereum.transaction.TransactionSimulatorResult;
 import org.hyperledger.besu.ethereum.worldstate.WorldStateArchive;
+import org.hyperledger.besu.evm.frame.MessageFrame;
+import org.hyperledger.besu.evm.frame.SoftFailureReason;
+import org.hyperledger.besu.evm.operation.Operation;
+import org.hyperledger.besu.evm.operation.Operation.OperationResult;
 import org.hyperledger.besu.evm.tracing.OperationTracer;
 
 import java.util.Map;
@@ -63,6 +67,8 @@ import org.apache.tuweni.bytes.Bytes32;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
@@ -98,6 +104,7 @@ public class EthEstimateGasTest {
     when(blockchainQueries.getMinimumTransactionCost(any())).thenReturn(MIN_TX_GAS_COST);
     when(blockchainQueries.accountBalance(any(), any())).thenReturn(Optional.of(Wei.MAX_WEI));
     when(blockchainQueries.getTransactionGasLimitCap(any())).thenReturn(Long.MAX_VALUE);
+    when(blockchainQueries.getTransactionExecutionGasLimit(any())).thenReturn(Long.MAX_VALUE);
     when(genesisBlockHeader.getGasLimit()).thenReturn(BLOCK_GAS_LIMIT);
     when(genesisBlockHeader.getNumber()).thenReturn(0L);
     when(finalizedBlockHeader.getGasLimit()).thenReturn(BLOCK_GAS_LIMIT);
@@ -517,9 +524,7 @@ public class EthEstimateGasTest {
                 modifiedLegacyTransactionCallParameter(
                     BLOCK_GAS_LIMIT, Wei.ZERO, OptionalLong.empty(), Optional.of(false))),
             eq(Optional.empty()), // no account overrides
-            eq(
-                TransactionValidationParams
-                    .transactionSimulatorAllowExceedingBalanceAndFutureNonceParams),
+            eq(TransactionValidationParams.estimateGasAllowExceedingBalanceAndFutureNonce()),
             any(OperationTracer.class),
             eq(pendingBlockHeader));
   }
@@ -538,7 +543,7 @@ public class EthEstimateGasTest {
                 modifiedLegacyTransactionCallParameter(
                     BLOCK_GAS_LIMIT, Wei.ZERO, OptionalLong.empty(), Optional.empty())),
             eq(Optional.empty()), // no account overrides
-            eq(TransactionValidationParams.transactionSimulatorAllowUnderpricedAndFutureNonce()),
+            eq(TransactionValidationParams.estimateGasAllowUnderpricedAndFutureNonce()),
             any(OperationTracer.class),
             eq(pendingBlockHeader));
   }
@@ -626,7 +631,7 @@ public class EthEstimateGasTest {
         .processOnPending(
             eq(modifiedEip1559TransactionCallParameter(TX_GAS_LIMIT_CAP, OptionalLong.empty())),
             eq(Optional.empty()), // no account overrides
-            eq(TransactionValidationParams.transactionSimulatorAllowUnderpricedAndFutureNonce()),
+            eq(TransactionValidationParams.estimateGasAllowUnderpricedAndFutureNonce()),
             any(OperationTracer.class),
             eq(pendingBlockHeader));
   }
@@ -666,6 +671,78 @@ public class EthEstimateGasTest {
   }
 
   @Test
+  public void shouldNotReturnMoreThanTheUpperBoundWhenTheOptimisticGasLimitIsAboveIt() {
+    // the gas used at the upper bound is so close to it that the optimistic limit is above it
+    final long gasUsed = BLOCK_GAS_LIMIT - 1_000L;
+    final long optimisticGasLimit = (long) ((gasUsed + 2_300L) * (64D / 63D));
+    mockSimulationAtGasLimit(MIN_TX_GAS_COST, false, 0L);
+    mockSimulationAtGasLimit(BLOCK_GAS_LIMIT, true, gasUsed);
+    mockSimulationAtGasLimit(gasUsed, false, 0L);
+    mockSimulationAtGasLimit(optimisticGasLimit, true, gasUsed);
+
+    final JsonRpcRequestContext request =
+        ethEstimateGasRequest(defaultLegacyTransactionCallParameter(Wei.ZERO));
+
+    final JsonRpcResponse expectedResponse =
+        new JsonRpcSuccessResponse(null, Quantity.create(BLOCK_GAS_LIMIT));
+
+    assertThat(optimisticGasLimit).isGreaterThan(BLOCK_GAS_LIMIT);
+    assertThat(method.response(request)).usingRecursiveComparison().isEqualTo(expectedResponse);
+  }
+
+  @ParameterizedTest
+  @CsvSource({
+    // a call stopped by its balance or depth check counts as a failed nested call
+    "0xF1, 16777216, true",
+    // a creation stopped by its checks counts before EIP-8037...
+    "0xF0, 9223372036854775807, true",
+    "0xF5, 9223372036854775807, true",
+    // ...but not from EIP-8037, where the creating frame runs those checks
+    "0xF0, 16777216, false",
+    "0xF5, 16777216, false"
+  })
+  public void shouldCountNestedCallsThatFailTheirPrecheck(
+      final String opcode, final long executionGasLimit, final boolean counted) {
+    when(blockchainQueries.getTransactionExecutionGasLimit(any())).thenReturn(executionGasLimit);
+    // a call with input, so that the estimate does not take the plain value transfer path
+    final CallParameter callParameter =
+        ImmutableCallParameter.builder()
+            .sender(Address.fromHexString("0x0"))
+            .to(Address.fromHexString("0x0"))
+            .input(Bytes.of(1))
+            .build();
+    final TransactionSimulatorResult success = successfulSimulation(50_000L);
+    final Operation operation = mock(Operation.class);
+    when(operation.getOpcode()).thenReturn(Integer.decode(opcode));
+    final MessageFrame frame = mock(MessageFrame.class);
+    when(frame.getCurrentOperation()).thenReturn(operation);
+    final OperationResult balanceCheckFailure =
+        new OperationResult(100L, 1, SoftFailureReason.LEGACY_INSUFFICIENT_BALANCE);
+    // below 60,000 gas the operation fails its balance check, before any frame starts
+    when(transactionSimulator.processOnPending(
+            any(), eq(Optional.empty()), any(), any(OperationTracer.class), eq(pendingBlockHeader)))
+        .thenAnswer(
+            invocation -> {
+              final CallParameter simulated = invocation.getArgument(0);
+              final OperationTracer tracer = invocation.getArgument(3);
+              if (simulated.getGas().orElseThrow() < 60_000L) {
+                tracer.tracePostExecution(frame, balanceCheckFailure);
+              }
+              return Optional.of(success);
+            });
+
+    final JsonRpcResponse response = method.response(ethEstimateGasRequest(callParameter));
+
+    assertThat(response).isInstanceOf(JsonRpcSuccessResponse.class);
+    final long estimate = Long.decode((String) ((JsonRpcSuccessResponse) response).getResult());
+    if (counted) {
+      assertThat(estimate).isGreaterThanOrEqualTo(60_000L);
+    } else {
+      assertThat(estimate).isLessThan(60_000L);
+    }
+  }
+
+  @Test
   public void shouldReturnMinTxCostForPlainTransferWithSingleSimulation() {
     mockSimulationAtGasLimit(MIN_TX_GAS_COST, true, MIN_TX_GAS_COST);
 
@@ -694,6 +771,16 @@ public class EthEstimateGasTest {
             any(OperationTracer.class),
             eq(pendingBlockHeader)))
         .thenReturn(Optional.of(mockTxSimResult));
+  }
+
+  private static TransactionSimulatorResult successfulSimulation(final long estimateGasUsed) {
+    final TransactionSimulatorResult mockTxSimResult = mock(TransactionSimulatorResult.class);
+    final TransactionProcessingResult mockResult = mock(TransactionProcessingResult.class);
+    when(mockResult.getEstimateGasUsedByTransaction()).thenReturn(estimateGasUsed);
+    when(mockResult.getRevertReason()).thenReturn(Optional.empty());
+    when(mockTxSimResult.result()).thenReturn(mockResult);
+    when(mockTxSimResult.isSuccessful()).thenReturn(true);
+    return mockTxSimResult;
   }
 
   private void failEstimationOnTxMinGas() {
