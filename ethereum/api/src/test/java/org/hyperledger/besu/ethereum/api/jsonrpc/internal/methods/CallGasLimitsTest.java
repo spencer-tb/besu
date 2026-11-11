@@ -17,6 +17,7 @@ package org.hyperledger.besu.ethereum.api.jsonrpc.internal.methods;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import org.hyperledger.besu.config.GenesisConfig;
+import org.hyperledger.besu.datatypes.Address;
 import org.hyperledger.besu.ethereum.api.ApiConfiguration;
 import org.hyperledger.besu.ethereum.api.ImmutableApiConfiguration;
 import org.hyperledger.besu.ethereum.api.jsonrpc.internal.JsonRpcRequest;
@@ -40,6 +41,7 @@ import java.util.List;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.apache.tuweni.bytes.Bytes;
+import org.apache.tuweni.bytes.Bytes32;
 import org.apache.tuweni.units.bigints.UInt256;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -100,6 +102,19 @@ public class CallGasLimitsTest {
   private static final String NEEDS_EXECUTION_GAS = "0x000000000000000000000000000000000000c0e0";
   private static final String NEEDS_EXECUTION_GAS_CODE =
       "0x5a6301312d0081106011575f5260205ff35b5f5ffd";
+  // Returns the code size of the address in its input:
+  //   PUSH1 0 CALLDATALOAD EXTCODESIZE PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN
+  private static final String CODE_SIZE = "0x000000000000000000000000000000000000c0e1";
+  private static final String CODE_SIZE_CODE = "0x6000353b5f5260205ff3";
+  // Init code that deploys two contracts of 24,576 bytes and ignores whether that succeeds. Each
+  // deployment needs about 37.8M state gas, so the two only fit with a reservoir:
+  //   PUSH6 (PUSH2 0x6000 PUSH1 0 RETURN) PUSH1 0 MSTORE
+  //   PUSH1 6 PUSH1 26 PUSH1 0 CREATE POP PUSH1 6 PUSH1 26 PUSH1 0 CREATE POP STOP
+  private static final String TWO_DEPLOYMENTS =
+      "0x656160006000f36000526006601a6000f0506006601a6000f05000";
+  private static final int DEPLOYED_CODE_SIZE = 0x6000;
+  // a block gas limit that fits the two deployments
+  private static final long LARGE_BLOCK_GAS_LIMIT = 100_000_000L;
 
   private final ObjectMapper mapper = new ObjectMapper();
 
@@ -108,9 +123,14 @@ public class CallGasLimitsTest {
 
   @BeforeEach
   public void setUp() throws Exception {
+    setUpChain(BLOCK_GAS_LIMIT);
+  }
+
+  private void setUpChain(final long blockGasLimit) throws Exception {
     final ObjectNode genesis =
         (ObjectNode) mapper.readTree(CallGasLimitsTest.class.getResource(GENESIS_RESOURCE));
     ((ObjectNode) genesis.get("config")).put("amsterdamTime", 0);
+    genesis.put("gasLimit", "0x" + Long.toHexString(blockGasLimit));
     final ObjectNode alloc = (ObjectNode) genesis.get("alloc");
     putCode(alloc, BURNER, BURNER_CODE);
     putCode(alloc, CATCHER, CATCHER_CODE);
@@ -120,6 +140,7 @@ public class CallGasLimitsTest {
     putCode(alloc, NEEDS_GAS, NEEDS_GAS_CODE);
     putCode(alloc, GAS_AT_CALL, GAS_AT_CALL_CODE);
     putCode(alloc, NEEDS_EXECUTION_GAS, NEEDS_EXECUTION_GAS_CODE);
+    putCode(alloc, CODE_SIZE, CODE_SIZE_CODE);
     fixture =
         ExecutionContextTestFixture.builder(GenesisConfig.fromConfig(genesis))
             .dataStorageFormat(DataStorageFormat.BONSAI)
@@ -130,7 +151,7 @@ public class CallGasLimitsTest {
             fixture.getBlockchain(),
             fixture.getStateArchive(),
             MiningConfiguration.MINING_DISABLED);
-    assertThat(fixture.getGenesis().getHeader().getGasLimit()).isEqualTo(BLOCK_GAS_LIMIT);
+    assertThat(fixture.getGenesis().getHeader().getGasLimit()).isEqualTo(blockGasLimit);
   }
 
   @Test
@@ -156,6 +177,48 @@ public class CallGasLimitsTest {
     final long gas = estimate(ApiConfiguration.DEFAULT_GAS_CAP, call(STORE_CATCHER));
 
     assertThat(gas).isLessThan(TX_MAX_GAS_LIMIT);
+  }
+
+  @Test
+  public void estimateAboveTheExecutionGasLimitLetsEveryNestedCreationSucceed() throws Exception {
+    setUpChain(LARGE_BLOCK_GAS_LIMIT);
+    final long gas =
+        estimate(
+            ApiConfiguration.DEFAULT_GAS_CAP,
+            "{\"from\":\"" + SENDER + "\",\"input\":\"" + TWO_DEPLOYMENTS + "\"}");
+    assertThat(gas).isBetween(TX_MAX_GAS_LIMIT, LARGE_BLOCK_GAS_LIMIT);
+
+    // deploy at the estimate as in a block, then read the code size of both created contracts
+    final Address deployer = Address.contractAddress(Address.fromHexString(SENDER), 0L);
+    final String deployment =
+        "{\"from\":\""
+            + SENDER
+            + "\",\"gas\":\"0x"
+            + Long.toHexString(gas)
+            + "\",\"maxFeePerGas\":\"0x0\",\"input\":\""
+            + TWO_DEPLOYMENTS
+            + "\"}";
+    final Object result =
+        success(
+            ethSimulateV1(ApiConfiguration.DEFAULT_GAS_CAP),
+            "eth_simulateV1",
+            simulation(
+                "{\"baseFeePerGas\":\"0x0\"}",
+                deployment
+                    + ","
+                    + codeSizeCall(Address.contractAddress(deployer, 1L))
+                    + ","
+                    + codeSizeCall(Address.contractAddress(deployer, 2L)),
+                true));
+    @SuppressWarnings("unchecked")
+    final List<CallProcessingResult> calls =
+        ((List<BlockStateCallResult>) result).get(0).getTransactionProcessingResults();
+    assertThat(calls).hasSize(3);
+    assertThat(calls.get(0).getStatus()).isEqualTo("0x1");
+    assertThat(word(calls.get(1).getReturnData())).isEqualTo(DEPLOYED_CODE_SIZE);
+    assertThat(word(calls.get(2).getReturnData()))
+        .as("second contract deployed at the estimate %d", gas)
+        .isEqualTo(DEPLOYED_CODE_SIZE);
   }
 
   @Test
@@ -335,6 +398,17 @@ public class CallGasLimitsTest {
         + to
         + "\",\"gas\":\"0x"
         + Long.toHexString(gas)
+        + "\"}";
+  }
+
+  // a call to CODE_SIZE for the given address, valid in a block with a zero base fee
+  private static String codeSizeCall(final Address address) {
+    return "{\"from\":\""
+        + SENDER
+        + "\",\"to\":\""
+        + CODE_SIZE
+        + "\",\"gas\":\"0x186a0\",\"maxFeePerGas\":\"0x0\",\"input\":\""
+        + Bytes32.leftPad(address.getBytes()).toHexString()
         + "\"}";
   }
 

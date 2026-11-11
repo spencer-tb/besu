@@ -29,6 +29,7 @@ import org.hyperledger.besu.evm.frame.MessageFrame;
 import org.hyperledger.besu.evm.tracing.OperationTracer;
 
 import java.util.Optional;
+import java.util.function.LongToIntFunction;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -89,21 +90,24 @@ public class EthEstimateGas extends AbstractEstimateGas {
     // intended.
     //
     // After Amsterdam (EIP-8037), gas above the transaction execution gas limit only feeds the
-    // state gas reservoir. A call that completes an inner call only with a reservoir would
-    // otherwise be sized past that limit, so the execution at the limit is also a reference when
-    // it succeeds.
-    int allowedFailedCalls = failedCalls.count();
+    // state gas reservoir, so a gas limit at or below it runs without a reservoir. A call that
+    // completes an inner call only with a reservoir would otherwise be sized past that limit, so
+    // such gas limits are held to the execution at the limit when it succeeds. Gas limits above
+    // it are held to the execution at the upper bound.
+    final int failedCallsAtUpperBound = failedCalls.count();
     final long executionGasLimit =
         getBlockchainQueries().getTransactionExecutionGasLimit(blockHeader);
-    if (executionGasLimit < gasLimitUpperBound) {
-      final FailedCallCounter cappedFailedCalls = new FailedCallCounter();
-      final var cappedResult =
-          simulationFunction.simulate(
-              overrideGasLimit(callParams, executionGasLimit), cappedFailedCalls);
-      if (cappedResult.isPresent() && cappedResult.get().isSuccessful()) {
-        allowedFailedCalls = Math.max(allowedFailedCalls, cappedFailedCalls.count());
-      }
-    }
+    final int failedCallsUpToExecutionGasLimit =
+        executionGasLimit < gasLimitUpperBound
+            ? Math.max(
+                failedCallsAtUpperBound,
+                failedCallsIfSuccessful(simulationFunction, callParams, executionGasLimit))
+            : failedCallsAtUpperBound;
+    final LongToIntFunction allowedFailedCalls =
+        gasLimit ->
+            gasLimit <= executionGasLimit
+                ? failedCallsUpToExecutionGasLimit
+                : failedCallsAtUpperBound;
 
     final var result = maybeResult.get();
     final long estimateGasUsed = result.result().getEstimateGasUsedByTransaction();
@@ -150,19 +154,33 @@ public class EthEstimateGas extends AbstractEstimateGas {
 
   /**
    * Returns whether the transaction succeeds with the given gas limit, without more of its nested
-   * calls failing than allowed.
+   * calls failing than allowed for that gas limit.
    */
   private boolean isSufficient(
       final TransactionSimulationFunction simulationFunction,
       final CallParameter callParams,
       final long gasLimit,
-      final int allowedFailedCalls) {
+      final LongToIntFunction allowedFailedCalls) {
     final FailedCallCounter failedCalls = new FailedCallCounter();
     final var result =
         simulationFunction.simulate(overrideGasLimit(callParams, gasLimit), failedCalls);
     return result.isPresent()
         && result.get().isSuccessful()
-        && failedCalls.count() <= allowedFailedCalls;
+        && failedCalls.count() <= allowedFailedCalls.applyAsInt(gasLimit);
+  }
+
+  /**
+   * Returns how many nested calls of the transaction fail with the given gas limit, or zero if the
+   * transaction itself fails.
+   */
+  private int failedCallsIfSuccessful(
+      final TransactionSimulationFunction simulationFunction,
+      final CallParameter callParams,
+      final long gasLimit) {
+    final FailedCallCounter failedCalls = new FailedCallCounter();
+    final var result =
+        simulationFunction.simulate(overrideGasLimit(callParams, gasLimit), failedCalls);
+    return result.isPresent() && result.get().isSuccessful() ? failedCalls.count() : 0;
   }
 
   private Optional<JsonRpcErrorResponse> validateSimulationResult(
