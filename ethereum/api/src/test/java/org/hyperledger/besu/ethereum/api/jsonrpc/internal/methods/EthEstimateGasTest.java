@@ -54,6 +54,7 @@ import org.hyperledger.besu.ethereum.transaction.TransactionSimulatorResult;
 import org.hyperledger.besu.ethereum.worldstate.WorldStateArchive;
 import org.hyperledger.besu.evm.frame.MessageFrame;
 import org.hyperledger.besu.evm.frame.SoftFailureReason;
+import org.hyperledger.besu.evm.operation.Operation;
 import org.hyperledger.besu.evm.operation.Operation.OperationResult;
 import org.hyperledger.besu.evm.tracing.OperationTracer;
 
@@ -66,6 +67,8 @@ import org.apache.tuweni.bytes.Bytes32;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
@@ -687,8 +690,20 @@ public class EthEstimateGasTest {
     assertThat(method.response(request)).usingRecursiveComparison().isEqualTo(expectedResponse);
   }
 
-  @Test
-  public void shouldNotSettleOnAGasLimitAtWhichANestedCallFailsItsPrecheck() {
+  @ParameterizedTest
+  @CsvSource({
+    // a call stopped by its balance or depth check counts as a failed nested call
+    "0xF1, 16777216, true",
+    // a creation stopped by its checks counts before EIP-8037...
+    "0xF0, 9223372036854775807, true",
+    "0xF5, 9223372036854775807, true",
+    // ...but not from EIP-8037, where the creating frame runs those checks
+    "0xF0, 16777216, false",
+    "0xF5, 16777216, false"
+  })
+  public void shouldCountNestedCallsThatFailTheirPrecheck(
+      final String opcode, final long executionGasLimit, final boolean counted) {
+    when(blockchainQueries.getTransactionExecutionGasLimit(any())).thenReturn(executionGasLimit);
     // a call with input, so that the estimate does not take the plain value transfer path
     final CallParameter callParameter =
         ImmutableCallParameter.builder()
@@ -697,10 +712,13 @@ public class EthEstimateGasTest {
             .input(Bytes.of(1))
             .build();
     final TransactionSimulatorResult success = successfulSimulation(50_000L);
+    final Operation operation = mock(Operation.class);
+    when(operation.getOpcode()).thenReturn(Integer.decode(opcode));
     final MessageFrame frame = mock(MessageFrame.class);
+    when(frame.getCurrentOperation()).thenReturn(operation);
     final OperationResult balanceCheckFailure =
         new OperationResult(100L, 1, SoftFailureReason.LEGACY_INSUFFICIENT_BALANCE);
-    // below 60,000 gas a nested call fails its balance check, before any frame starts
+    // below 60,000 gas the operation fails its balance check, before any frame starts
     when(transactionSimulator.processOnPending(
             any(), eq(Optional.empty()), any(), any(OperationTracer.class), eq(pendingBlockHeader)))
         .thenAnswer(
@@ -716,8 +734,12 @@ public class EthEstimateGasTest {
     final JsonRpcResponse response = method.response(ethEstimateGasRequest(callParameter));
 
     assertThat(response).isInstanceOf(JsonRpcSuccessResponse.class);
-    final String estimate = (String) ((JsonRpcSuccessResponse) response).getResult();
-    assertThat(Long.decode(estimate)).isGreaterThanOrEqualTo(60_000L);
+    final long estimate = Long.decode((String) ((JsonRpcSuccessResponse) response).getResult());
+    if (counted) {
+      assertThat(estimate).isGreaterThanOrEqualTo(60_000L);
+    } else {
+      assertThat(estimate).isLessThan(60_000L);
+    }
   }
 
   @Test
