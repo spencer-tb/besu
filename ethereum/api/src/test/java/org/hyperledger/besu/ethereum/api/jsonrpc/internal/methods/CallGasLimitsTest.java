@@ -115,6 +115,9 @@ public class CallGasLimitsTest {
   private static final int DEPLOYED_CODE_SIZE = 0x6000;
   // a block gas limit that fits the two deployments
   private static final long LARGE_BLOCK_GAS_LIMIT = 100_000_000L;
+  // calldata whose EIP-7976 floor cost of 64 gas per byte alone is TX_MAX_GAS_LIMIT
+  private static final String FLOOR_ABOVE_TX_MAX_CALLDATA =
+      "0x" + "00".repeat((int) (TX_MAX_GAS_LIMIT / 64));
 
   private final ObjectMapper mapper = new ObjectMapper();
 
@@ -307,6 +310,25 @@ public class CallGasLimitsTest {
                 + "\",\"to\":\""
                 + NEEDS_EXECUTION_GAS
                 + "\",\"strict\":false}"));
+  }
+
+  @Test
+  public void estimateRejectsAnIntrinsicCostAboveTheExecutionGasLimit() throws Exception {
+    final String call =
+        "{\"from\":\""
+            + SENDER
+            + "\",\"to\":\""
+            + GAS_AT_CALL
+            + "\",\"input\":\""
+            + FLOOR_ABOVE_TX_MAX_CALLDATA
+            + "\"";
+    final EthEstimateGas method = ethEstimateGas(ApiConfiguration.DEFAULT_GAS_CAP);
+
+    // the transaction is not valid in a block, with or without strict mode
+    error(method, "eth_estimateGas", atLatest(call + "}"));
+    error(method, "eth_estimateGas", atLatest(call + ",\"strict\":false}"));
+    // eth_call lifts the cap
+    success(ethCall(ApiConfiguration.DEFAULT_GAS_CAP), "eth_call", atLatest(call + "}"));
   }
 
   @Test

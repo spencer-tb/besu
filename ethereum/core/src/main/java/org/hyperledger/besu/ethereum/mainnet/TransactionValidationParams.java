@@ -44,9 +44,17 @@ public interface TransactionValidationParams {
       ImmutableTransactionValidationParams.of(
           true, false, false, false, false, true, true, false, false, false, false, true);
 
-  TransactionValidationParams transactionSimulatorAllowUnderpricedAndFutureNonceParams =
+  // eth_estimateGas: as the transaction simulator, but the EIP-8037 cap on the intrinsic and
+  // calldata floor cost applies, since the transaction is estimated as it executes in a block.
+  TransactionValidationParams estimateGasAllowUnderpricedAndFutureNonceParams =
       ImmutableTransactionValidationParams.of(
-          true, false, true, false, false, true, true, false, false, false, false, true);
+          true, false, true, false, false, true, true, false, false, false, false, false);
+
+  // eth_estimateGas without strict mode: as estimateGasAllowUnderpricedAndFutureNonceParams, but
+  // the sender's balance need not cover the gas fees.
+  TransactionValidationParams estimateGasAllowExceedingBalanceAndFutureNonceParams =
+      ImmutableTransactionValidationParams.of(
+          true, true, false, false, false, true, true, false, false, false, false, false);
 
   TransactionValidationParams transactionSimulatorAllowExceedingBalanceParams =
       ImmutableTransactionValidationParams.of(
@@ -189,8 +197,22 @@ public interface TransactionValidationParams {
     return transactionSimulatorParamsAllowFutureNonce;
   }
 
-  static TransactionValidationParams transactionSimulatorAllowUnderpricedAndFutureNonce() {
-    return transactionSimulatorAllowUnderpricedAndFutureNonceParams;
+  /**
+   * Returns validation params for eth_estimateGas in strict mode. Underpriced gas and future nonces
+   * are allowed, and after Amsterdam the intrinsic and calldata floor cost must stay within
+   * TX_MAX_GAS_LIMIT, as in a block (EIP-8037).
+   */
+  static TransactionValidationParams estimateGasAllowUnderpricedAndFutureNonce() {
+    return estimateGasAllowUnderpricedAndFutureNonceParams;
+  }
+
+  /**
+   * Returns validation params for eth_estimateGas without strict mode. The sender's balance need
+   * not cover the gas fees, future nonces are allowed, and after Amsterdam the intrinsic and
+   * calldata floor cost must stay within TX_MAX_GAS_LIMIT, as in a block (EIP-8037).
+   */
+  static TransactionValidationParams estimateGasAllowExceedingBalanceAndFutureNonce() {
+    return estimateGasAllowExceedingBalanceAndFutureNonceParams;
   }
 
   static TransactionValidationParams transactionSimulatorAllowExceedingBalance() {
