@@ -88,7 +88,7 @@ public class BlockStateCallSimulationResult {
    * @return the remaining gas of the block
    */
   public long getRemainingGas() {
-    return Math.min(remainingBlockGas(), Math.max(gasBudget - cumulativeGasUsed, 0));
+    return Math.min(getRemainingBlockGas(), Math.max(gasBudget - cumulativeGasUsed, 0));
   }
 
   /**
@@ -98,10 +98,16 @@ public class BlockStateCallSimulationResult {
    * @return the default gas limit of the next call
    */
   public long getRemainingDefaultGas() {
-    return Math.min(remainingBlockGas(), Math.max(defaultGasBudget - cumulativeGasUsed, 0));
+    return Math.min(getRemainingBlockGas(), Math.max(defaultGasBudget - cumulativeGasUsed, 0));
   }
 
-  private long remainingBlockGas() {
+  /**
+   * Returns the largest gas limit that the block can still include, as the fork's block gas
+   * accounting checks it, whatever the remaining gas budget.
+   *
+   * @return the remaining gas of the block
+   */
+  public long getRemainingBlockGas() {
     final long remainingExecutionGas = Math.max(blockGasLimit - cumulativeExecutionGasUsed, 0);
     final long remainingStateGas = Math.max(blockGasLimit - cumulativeStateGasUsed, 0);
     return blockGasAccountingStrategy.hasBlockCapacity(

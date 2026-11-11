@@ -76,6 +76,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.function.BiFunction;
 import java.util.function.Supplier;
 
@@ -475,18 +476,21 @@ public class BlockSimulator {
         }
       }
 
-      // A call that sets its gas limit may use a gas budget floored at the gas limit of the block
-      // the simulation starts from. A call that omits it gets a default that the RPC gas cap
-      // bounds.
-      final long remainingGas =
-          callParameter.getGas().isPresent()
-              ? blockStateCallSimulationResult.getRemainingGas()
-              : blockStateCallSimulationResult.getRemainingDefaultGas();
-      if (callParameter.getGas().isPresent() && callParameter.getGas().getAsLong() > remainingGas) {
+      // A call that sets its gas limit must fit in the block, and is clamped to a gas budget
+      // floored at the gas limit of the block the simulation starts from. A call that omits it
+      // gets a default that the RPC gas cap bounds.
+      final OptionalLong requestedGasLimit = callParameter.getGas();
+      if (requestedGasLimit.isPresent()
+          && requestedGasLimit.getAsLong()
+              > blockStateCallSimulationResult.getRemainingBlockGas()) {
         throw new BlockStateCallException(
             BlockStateCallError.BLOCK_GAS_LIMIT_EXCEEDED.getMessage(),
             BlockStateCallError.BLOCK_GAS_LIMIT_EXCEEDED);
       }
+      final long remainingGas =
+          requestedGasLimit.isPresent()
+              ? blockStateCallSimulationResult.getRemainingGas()
+              : blockStateCallSimulationResult.getRemainingDefaultGas();
 
       if (validationParams.isAllowFutureNonce()) {
         final Address sender = callParameter.getSender().orElse(TransactionSimulator.DEFAULT_FROM);
@@ -502,7 +506,11 @@ public class BlockSimulator {
 
       long gasLimit =
           transactionSimulator.calculateSimulationGasCap(
-              blockHeader, callParameter.getGas(), remainingGas);
+              blockHeader,
+              requestedGasLimit.isPresent()
+                  ? OptionalLong.of(Math.min(requestedGasLimit.getAsLong(), remainingGas))
+                  : requestedGasLimit,
+              remainingGas);
 
       // When enforcing consensus caps (block-building mode), bound the auto-filled gas limit to
       // txGasLimitCap (EIP-7825/EIP-8037) so the built transaction passes validation. For

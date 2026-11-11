@@ -95,6 +95,9 @@ public class CallGasLimitsTest {
   // Returns the gas left at entry: GAS PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN
   private static final String GAS_AT_CALL = "0x000000000000000000000000000000000000c0df";
   private static final String GAS_AT_CALL_CODE = "0x5a5f5260205ff3";
+  // Loops until it runs out of gas: JUMPDEST PUSH1 0 JUMP
+  private static final String LOOP = "0x000000000000000000000000000000000000c0e2";
+  private static final String LOOP_CODE = "0x5b600056";
   // gas above TX_MAX_GAS_LIMIT and below the block gas limit
   private static final long GAS_ABOVE_TX_MAX = 25_000_000L;
   // Returns the gas left at entry if it is at least 20,000,000, above TX_MAX_GAS_LIMIT, reverts
@@ -144,6 +147,7 @@ public class CallGasLimitsTest {
     putCode(alloc, GAS_AT_CALL, GAS_AT_CALL_CODE);
     putCode(alloc, NEEDS_EXECUTION_GAS, NEEDS_EXECUTION_GAS_CODE);
     putCode(alloc, CODE_SIZE, CODE_SIZE_CODE);
+    putCode(alloc, LOOP, LOOP_CODE);
     fixture =
         ExecutionContextTestFixture.builder(GenesisConfig.fromConfig(genesis))
             .dataStorageFormat(DataStorageFormat.BONSAI)
@@ -300,11 +304,43 @@ public class CallGasLimitsTest {
 
   @Test
   public void simulateBlockOverrideOfTheGasLimitDoesNotRaiseTheCap() throws Exception {
+    // the call fits in the overridden block, so it is clamped to the budget, which the override
+    // does not raise above the gas limit of the base block
+    final CallProcessingResult result =
+        simulatedCall(
+            LOW_GAS_CAP,
+            simulation("{\"gasLimit\":\"0x3b9aca00\"}", call(GAS_AT_CALL, 40_000_000L), false));
+
+    assertThat(result.getStatus()).isEqualTo("0x1");
+    assertThat(word(result.getReturnData())).isLessThanOrEqualTo(BLOCK_GAS_LIMIT);
+  }
+
+  @Test
+  public void simulateCallWithGasAboveTheRemainingBudgetIsClampedToIt() throws Exception {
+    // the first block spends 25M of the 30M budget, so the call in the second block gets 5M
+    final String blocks =
+        "{\"blockStateCalls\":[{\"calls\":["
+            + call(LOOP, 25_000_000L)
+            + "]},{\"calls\":["
+            + call(GAS_AT_CALL, 20_000_000L)
+            + "]}],\"validation\":false}";
+    final Object result = success(ethSimulateV1(LOW_GAS_CAP), "eth_simulateV1", atLatest(blocks));
+
+    @SuppressWarnings("unchecked")
+    final List<BlockStateCallResult> results = (List<BlockStateCallResult>) result;
+    assertThat(results).hasSize(2);
+    final CallProcessingResult clamped = results.get(1).getTransactionProcessingResults().get(0);
+    assertThat(clamped.getStatus()).isEqualTo("0x1");
+    assertThat(word(clamped.getReturnData())).isLessThanOrEqualTo(BLOCK_GAS_LIMIT - 25_000_000L);
+  }
+
+  @Test
+  public void simulateCallWithGasAboveTheRemainingGasOfItsBlockFails() throws Exception {
     final JsonRpcError error =
         error(
             ethSimulateV1(LOW_GAS_CAP),
             "eth_simulateV1",
-            simulation("{\"gasLimit\":\"0x3b9aca00\"}", call(GAS_AT_CALL, 40_000_000L), false));
+            simulation("{}", call(GAS_AT_CALL, BLOCK_GAS_LIMIT + 1), false));
 
     assertThat(error.getCode()).isEqualTo(BlockStateCallError.BLOCK_GAS_LIMIT_EXCEEDED.getCode());
   }
