@@ -56,6 +56,19 @@ public interface TransactionValidationParams {
       ImmutableTransactionValidationParams.of(
           true, true, false, false, false, true, true, false, false, false, false, true);
 
+  // eth_call: as transactionSimulatorParamsAllowFutureNonce, but after Amsterdam the whole gas
+  // limit is available as execution gas (EIP-8037), so a read-only call can need more execution
+  // than a transaction can have.
+  TransactionValidationParams callSimulatorAllowFutureNonceParams =
+      ImmutableTransactionValidationParams.of(
+          true, false, false, false, false, true, true, false, false, false, true, true);
+
+  // eth_call: as transactionSimulatorAllowExceedingBalanceAndFutureNonceParams, with the whole gas
+  // limit available as execution gas after Amsterdam (EIP-8037).
+  TransactionValidationParams callSimulatorAllowExceedingBalanceAndFutureNonceParams =
+      ImmutableTransactionValidationParams.of(
+          true, true, false, false, false, true, true, false, false, false, true, true);
+
   // eth_simulateV1 non-strict: allows exceeding balance and future nonces, and preserves
   // caller-provided gas pricing so that gas fees are actually charged during simulation.
   TransactionValidationParams blockSimulatorNonStrictParams =
@@ -186,6 +199,24 @@ public interface TransactionValidationParams {
 
   static TransactionValidationParams transactionSimulatorAllowExceedingBalanceAndFutureNonce() {
     return transactionSimulatorAllowExceedingBalanceAndFutureNonceParams;
+  }
+
+  /**
+   * Returns validation params for eth_call that validates the caller's gas pricing. Future nonces
+   * are allowed, and after Amsterdam the whole gas limit is available as execution gas instead of
+   * capping it at TX_MAX_GAS_LIMIT (EIP-8037).
+   */
+  static TransactionValidationParams callSimulatorAllowFutureNonce() {
+    return callSimulatorAllowFutureNonceParams;
+  }
+
+  /**
+   * Returns validation params for eth_call without gas fees. The sender's balance need not cover
+   * them, future nonces are allowed, and after Amsterdam the whole gas limit is available as
+   * execution gas instead of capping it at TX_MAX_GAS_LIMIT (EIP-8037).
+   */
+  static TransactionValidationParams callSimulatorAllowExceedingBalanceAndFutureNonce() {
+    return callSimulatorAllowExceedingBalanceAndFutureNonceParams;
   }
 
   /**

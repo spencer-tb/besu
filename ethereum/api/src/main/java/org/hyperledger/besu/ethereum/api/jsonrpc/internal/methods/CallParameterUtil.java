@@ -112,7 +112,8 @@ public class CallParameterUtil {
    * Returns the validation parameters eth_call uses for a call. When {@link
    * #isAllowExceedingBalance} holds, the call runs with a zero gas price and base fee and without
    * execution gas fees; otherwise it is validated against the block's base fee and the sender's
-   * balance and pays for its gas.
+   * balance and pays for its gas. Either way, after Amsterdam the whole gas limit of the call is
+   * available as execution gas (EIP-8037).
    *
    * @param header the header of the block the call runs on
    * @param callParams the call parameters
@@ -121,7 +122,7 @@ public class CallParameterUtil {
   public static TransactionValidationParams getTransactionValidationParams(
       final BlockHeader header, final CallParameter callParams) {
     return isAllowExceedingBalance(header, callParams)
-        ? TransactionValidationParams.transactionSimulatorAllowExceedingBalanceAndFutureNonce()
-        : TransactionValidationParams.transactionSimulatorAllowFutureNonce();
+        ? TransactionValidationParams.callSimulatorAllowExceedingBalanceAndFutureNonce()
+        : TransactionValidationParams.callSimulatorAllowFutureNonce();
   }
 }

@@ -93,6 +93,13 @@ public class CallGasLimitsTest {
   // Returns the gas left at entry: GAS PUSH0 MSTORE PUSH1 0x20 PUSH0 RETURN
   private static final String GAS_AT_CALL = "0x000000000000000000000000000000000000c0df";
   private static final String GAS_AT_CALL_CODE = "0x5a5f5260205ff3";
+  // gas above TX_MAX_GAS_LIMIT and below the block gas limit
+  private static final long GAS_ABOVE_TX_MAX = 25_000_000L;
+  // Returns the gas left at entry if it is at least 20,000,000, above TX_MAX_GAS_LIMIT, reverts
+  // otherwise. As NEEDS_GAS, with PUSH4 20000000.
+  private static final String NEEDS_EXECUTION_GAS = "0x000000000000000000000000000000000000c0e0";
+  private static final String NEEDS_EXECUTION_GAS_CODE =
+      "0x5a6301312d0081106011575f5260205ff35b5f5ffd";
 
   private final ObjectMapper mapper = new ObjectMapper();
 
@@ -112,6 +119,7 @@ public class CallGasLimitsTest {
     putCode(alloc, STORE_CATCHER, STORE_CATCHER_CODE);
     putCode(alloc, NEEDS_GAS, NEEDS_GAS_CODE);
     putCode(alloc, GAS_AT_CALL, GAS_AT_CALL_CODE);
+    putCode(alloc, NEEDS_EXECUTION_GAS, NEEDS_EXECUTION_GAS_CODE);
     fixture =
         ExecutionContextTestFixture.builder(GenesisConfig.fromConfig(genesis))
             .dataStorageFormat(DataStorageFormat.BONSAI)
@@ -209,6 +217,58 @@ public class CallGasLimitsTest {
     assertThat(error.getCode()).isEqualTo(BlockStateCallError.BLOCK_GAS_LIMIT_EXCEEDED.getCode());
   }
 
+  @Test
+  public void callCanSpendItsWholeGasLimitOnExecution() throws Exception {
+    final Object output =
+        success(
+            ethCall(ApiConfiguration.DEFAULT_GAS_CAP),
+            "eth_call",
+            atLatest(call(GAS_AT_CALL, GAS_ABOVE_TX_MAX)));
+
+    assertThat(word(output)).isGreaterThan(TX_MAX_GAS_LIMIT);
+  }
+
+  @Test
+  public void estimateCapsExecutionGasAsInABlock() throws Exception {
+    final EthEstimateGas method = ethEstimateGas(ApiConfiguration.DEFAULT_GAS_CAP);
+
+    // the call needs more execution gas than a transaction can have, so no gas limit suffices,
+    // with or without strict mode
+    error(method, "eth_estimateGas", atLatest(call(NEEDS_EXECUTION_GAS)));
+    error(
+        method,
+        "eth_estimateGas",
+        atLatest(
+            "{\"from\":\""
+                + SENDER
+                + "\",\"to\":\""
+                + NEEDS_EXECUTION_GAS
+                + "\",\"strict\":false}"));
+  }
+
+  @Test
+  public void simulateWithValidationCapsExecutionGasAsInABlock() throws Exception {
+    final CallProcessingResult result =
+        simulatedCall(
+            ApiConfiguration.DEFAULT_GAS_CAP,
+            simulation(
+                "{\"baseFeePerGas\":\"0x0\"}", unpricedCall(GAS_AT_CALL, GAS_ABOVE_TX_MAX), true));
+
+    assertThat(result.getStatus()).isEqualTo("0x1");
+    assertThat(word(result.getReturnData())).isLessThan(TX_MAX_GAS_LIMIT);
+  }
+
+  @Test
+  public void simulateWithoutValidationCanSpendTheWholeGasLimitOnExecution() throws Exception {
+    final CallProcessingResult result =
+        simulatedCall(
+            ApiConfiguration.DEFAULT_GAS_CAP,
+            simulation("{}", call(GAS_AT_CALL, GAS_ABOVE_TX_MAX), false));
+
+    assertThat(result.getStatus()).isEqualTo("0x1");
+    assertThat(word(result.getReturnData())).isGreaterThan(TX_MAX_GAS_LIMIT);
+  }
+
   private CallProcessingResult simulatedCall(final long gasCap, final String simulation)
       throws Exception {
     final Object result = success(ethSimulateV1(gasCap), "eth_simulateV1", simulation);
@@ -276,6 +336,17 @@ public class CallGasLimitsTest {
         + "\",\"gas\":\"0x"
         + Long.toHexString(gas)
         + "\"}";
+  }
+
+  // a call with a zero fee cap, valid in a block with a zero base fee
+  private static String unpricedCall(final String to, final long gas) {
+    return "{\"from\":\""
+        + SENDER
+        + "\",\"to\":\""
+        + to
+        + "\",\"gas\":\"0x"
+        + Long.toHexString(gas)
+        + "\",\"maxFeePerGas\":\"0x0\"}";
   }
 
   private static String atLatest(final String call) {
