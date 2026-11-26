@@ -393,7 +393,8 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
   private static final ObjectMapper SHARED_PARAMS_MAPPER = JsonUtils.createObjectMapper();
 
   /**
-   * The engine machinery every test in a run shares, created once on first use.
+   * The engine machinery every test in a run shares, created on first use and stopped when the run
+   * ends, so a later run in the same JVM, such as the next unit test, starts machinery of its own.
    *
    * <p>These live in a holder rather than in static fields of the subcommand because picocli
    * instantiates every registered subcommand when it builds the {@code CommandLine}, which loads
@@ -403,16 +404,6 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
    */
   private static final class EngineHarness {
     private static final NoOpMetricsSystem METRICS = new NoOpMetricsSystem();
-    private static final Vertx VERTX = Vertx.vertx();
-    private static final EthScheduler SCHEDULER =
-        new EthScheduler(
-            Runtime.getRuntime().availableProcessors(),
-            1,
-            Runtime.getRuntime().availableProcessors(),
-            METRICS);
-    private static final EthPeers PEERS = new HarnessEthPeers(METRICS);
-    private static final EthContext ETH_CONTEXT =
-        new EthContext(PEERS, new EthMessages(), SCHEDULER, null);
     private static final SynchronizerConfiguration SYNC_CONFIGURATION =
         SynchronizerConfiguration.builder().build();
     private static final BackwardSyncAlgorithmFactory BACKWARD_SYNC_ALGORITHMS =
@@ -428,21 +419,48 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
           public void stop() {}
         };
 
+    private static @Nullable EngineHarness running;
+
+    private final Vertx vertx = Vertx.vertx();
+    private final EthScheduler scheduler =
+        new EthScheduler(
+            Runtime.getRuntime().availableProcessors(),
+            1,
+            Runtime.getRuntime().availableProcessors(),
+            METRICS);
+    private final EthPeers peers = new HarnessEthPeers(METRICS);
+    private final EthContext ethContext = new EthContext(peers, new EthMessages(), scheduler, null);
+
+    private EngineHarness() {}
+
+    /** Returns the run's machinery, starting it on the run's first use. */
+    private static synchronized EngineHarness get() {
+      EngineHarness harness = running;
+      if (harness == null) {
+        harness = new EngineHarness();
+        running = harness;
+      }
+      return harness;
+    }
+
     /**
      * Stops the event loop and the executor pools, so a caller that does not exit the JVM is not
      * left with them running for its lifetime.
      */
-    private static void shutdown() {
-      SCHEDULER.stop();
+    private static synchronized void shutdown() {
+      final EngineHarness harness = running;
+      if (harness == null) {
+        return;
+      }
+      running = null;
+      harness.scheduler.stop();
       try {
-        SCHEDULER.awaitStop();
+        harness.scheduler.awaitStop();
       } catch (final InterruptedException e) {
         Thread.currentThread().interrupt();
       }
-      VERTX.close();
+      harness.vertx.close();
     }
-
-    private EngineHarness() {}
   }
 
   /**
@@ -576,7 +594,7 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
             schedule,
             EngineHarness.SYNC_CONFIGURATION,
             EngineHarness.METRICS,
-            EngineHarness.ETH_CONTEXT,
+            EngineHarness.get().ethContext,
             // Read only by backward sync, which waits for isInitialSyncDone(), never set here.
             null,
             BackwardChain.from(
@@ -589,7 +607,7 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
     return new MergeCoordinator(
         context,
         schedule,
-        EngineHarness.SCHEDULER,
+        EngineHarness.get().scheduler,
         null,
         MiningConfiguration.newDefault(),
         backwardSyncContext) {
@@ -630,10 +648,10 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
         new ExecutionEngineJsonRpcMethod.ConstructorArguments(
             schedule,
             context,
-            EngineHarness.VERTX,
+            EngineHarness.get().vertx,
             EngineHarness.LISTENER,
             coordinator,
-            EngineHarness.PEERS,
+            EngineHarness.get().peers,
             EngineHarness.METRICS,
             // Only read by engine_forkchoiceUpdatedV4 when the call carries custodyColumns, which
             // the fixtures never do — there is no transaction pool behind this runner.
@@ -755,7 +773,7 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
 
     final ArrayNode rejections = FixtureRunner.newRejections();
     final FixturePayloadBuilder builder =
-        build ? new FixturePayloadBuilder(context, schedule, EngineHarness.SCHEDULER) : null;
+        build ? new FixturePayloadBuilder(context, schedule, EngineHarness.get().scheduler) : null;
     for (int i = 0; i < payloads.length; i++) {
       final EngineTestCaseSpec.EngineNewPayload payload = payloads[i];
       if (builder != null) {

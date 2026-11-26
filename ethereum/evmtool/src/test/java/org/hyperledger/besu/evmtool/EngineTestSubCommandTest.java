@@ -45,19 +45,13 @@ import java.util.function.Consumer;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import org.junit.jupiter.api.MethodOrderer;
-import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import picocli.CommandLine;
 
-// The first engine-test run in a JVM stops the harness's scheduler, after which a valid payload
-// cannot run, so the one test that runs a valid payload goes first.
-@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class EngineTestSubCommandTest {
 
   private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -157,7 +151,6 @@ class EngineTestSubCommandTest {
   }
 
   @Test
-  @Order(1)
   void balReportPrintsTheDecisionLineOnStderr() throws IOException {
     final PrintStream originalErr = System.err;
     final ByteArrayOutputStream stderr = new ByteArrayOutputStream();
