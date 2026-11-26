@@ -149,6 +149,17 @@ fork groups, so `for_frontier`, `for_homestead`, `for_tangerinewhistle`, `for_sp
 `for_byzantium`, `for_constantinoplefix`, `for_istanbul`, `for_berlin` and `for_london` exist only
 in `blockchain_tests`.
 
+`evmtool build-test` stands in for the EELS `build_block` hive simulator, which builds each payload
+a fixture expects to be valid through a running client's `testing_buildBlockV1`. It builds each one
+in process, on the payload's parent and with the payload's gas limit as the target, compares every
+field of the fixture's payload with the built one's, `gasLimit` and `blockHash` included, and then
+imports the fixture's payload as `engine-test` does. Payloads the fixture expects to be invalid are
+skipped.
+
+```bash
+evmtool build-test --json-array path/to/blockchain_tests_engine
+```
+
 ### Translating a hive invocation
 
 The properties are named after the hive flags they stand in for, and are shared by both tasks, so
