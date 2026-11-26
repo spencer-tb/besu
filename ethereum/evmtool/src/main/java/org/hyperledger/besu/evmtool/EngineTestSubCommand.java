@@ -218,6 +218,12 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
 
   private final List<ObjectNode> jsonArrayResults = Collections.synchronizedList(new ArrayList<>());
 
+  /**
+   * Whether this runs as {@code build-test}, which builds each payload the fixture expects to be
+   * valid before importing it.
+   */
+  private boolean build = false;
+
   @ParentCommand private final EvmToolCommand parentCommand;
 
   @Parameters private final List<Path> engineTestFiles = new ArrayList<>();
@@ -230,6 +236,31 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
 
   EngineTestSubCommand(final EvmToolCommand parentCommand) {
     this.parentCommand = parentCommand;
+  }
+
+  /**
+   * The runner behind {@code build-test}: engine-test's replay, with each payload the fixture
+   * expects to be valid first built and compared, and the ones it expects to be invalid skipped. It
+   * takes none of the BAL or exception flags, since Besu derives each access list itself while
+   * building and no rejection is expected.
+   */
+  static EngineTestSubCommand forBuildTest(
+      final EvmToolCommand parentCommand,
+      final @Nullable String testName,
+      final @Nullable String testNameRegex,
+      final int workers,
+      final boolean jsonArray,
+      final boolean verbose,
+      final List<Path> files) {
+    final EngineTestSubCommand runner = new EngineTestSubCommand(parentCommand);
+    runner.build = true;
+    runner.testName = testName;
+    runner.testNameRegex = testNameRegex;
+    runner.workers = workers;
+    runner.jsonArray = jsonArray;
+    runner.verbose = verbose;
+    runner.engineTestFiles.addAll(files);
+    return runner;
   }
 
   @Override
@@ -723,8 +754,24 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
     }
 
     final ArrayNode rejections = FixtureRunner.newRejections();
+    final FixturePayloadBuilder builder =
+        build ? new FixturePayloadBuilder(context, schedule, EngineHarness.SCHEDULER) : null;
     for (int i = 0; i < payloads.length; i++) {
       final EngineTestCaseSpec.EngineNewPayload payload = payloads[i];
+      if (builder != null) {
+        // A payload expected to be invalid is neither built nor imported: nothing builds on it.
+        if (!payload.expectsValid()) {
+          continue;
+        }
+        try {
+          builder.build(i, payload, rejections);
+        } catch (final Exception e) {
+          // As for the import below, anything escaping the method is a defect, not a refusal.
+          testPassed = false;
+          failureReason = String.format("payload %d: build: %s: %s", i, e.getClass().getName(), e);
+          break;
+        }
+      }
       final int version = payload.getNewPayloadVersion();
 
       final ExecutionEngineJsonRpcMethod method = getNewPayload.apply(version);
@@ -926,6 +973,13 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
       }
     }
 
+    // A build test also fails on a payload Besu built differently or refused to build.
+    final String buildFailure = builder == null ? null : builder.failure();
+    if (testPassed && buildFailure != null) {
+      testPassed = false;
+      failureReason = buildFailure;
+    }
+
     // Validate last block hash
     if (testPassed && !blockchain.getChainHeadHash().equals(spec.getLastBlockHash())) {
       testPassed = false;
@@ -943,6 +997,7 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
         testPassed ? "" : failureReason,
         lastPayloadStatus,
         rejections,
+        builder,
         results);
   }
 
@@ -950,7 +1005,7 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
    * Formats a JSON-RPC error as the rejection reason: {@code <code>: <message>}, followed by {@code
    * : <data>} when the error carries data.
    */
-  private static String rpcError(final JsonRpcError error) {
+  static String rpcError(final JsonRpcError error) {
     final String reason = error.getCode() + ": " + error.getMessage();
     return error.getData() == null ? reason : reason + ": " + error.getData();
   }
@@ -1003,6 +1058,7 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
         failureReason,
         null,
         FixtureRunner.newRejections(),
+        null,
         results);
   }
 
@@ -1015,6 +1071,7 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
    *
    * @param blockchain the chain to report a head hash from, or null when the failure happened
    *     before there was one
+   * @param builder what a build test built, or null when it ended before any payload was built
    */
   private void recordResult(
       final String test,
@@ -1024,6 +1081,7 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
       final String failureReason,
       final @Nullable EngineStatus lastPayloadStatus,
       final ArrayNode rejections,
+      final @Nullable FixturePayloadBuilder builder,
       final FixtureRunner.TestResults results) {
     if (testPassed) {
       if (verbose) {
@@ -1052,6 +1110,15 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
       // failed one.
       result.put("error", failureReason);
       result.set("rejections", rejections);
+      if (build) {
+        if (builder == null) {
+          result.put("built", 0);
+          result.putArray("mismatches");
+        } else {
+          result.put("built", builder.built());
+          result.set("mismatches", builder.mismatches());
+        }
+      }
       jsonArrayResults.add(result);
     }
   }
