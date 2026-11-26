@@ -34,6 +34,7 @@ import org.hyperledger.besu.ethereum.api.jsonrpc.internal.response.JsonRpcSucces
 import org.hyperledger.besu.ethereum.api.jsonrpc.internal.response.RpcErrorType;
 import org.hyperledger.besu.ethereum.api.jsonrpc.internal.results.BlobsBundleV2;
 import org.hyperledger.besu.ethereum.api.jsonrpc.internal.results.EngineGetPayloadResultV1;
+import org.hyperledger.besu.ethereum.api.jsonrpc.internal.results.EngineGetPayloadResultV3;
 import org.hyperledger.besu.ethereum.api.jsonrpc.internal.results.EngineGetPayloadResultV5;
 import org.hyperledger.besu.ethereum.api.jsonrpc.internal.results.EngineGetPayloadResultV6;
 import org.hyperledger.besu.ethereum.api.util.DomainObjectDecodeUtils;
@@ -47,6 +48,7 @@ import org.hyperledger.besu.ethereum.core.MiningConfiguration;
 import org.hyperledger.besu.ethereum.core.Request;
 import org.hyperledger.besu.ethereum.core.Transaction;
 import org.hyperledger.besu.ethereum.core.Withdrawal;
+import org.hyperledger.besu.ethereum.core.encoding.EncodingContext;
 import org.hyperledger.besu.ethereum.eth.manager.EthScheduler;
 import org.hyperledger.besu.ethereum.eth.transactions.TransactionPool;
 import org.hyperledger.besu.ethereum.mainnet.ProtocolSchedule;
@@ -83,6 +85,7 @@ public class TestingBuildBlockV1 implements JsonRpcMethod {
   private final MiningConfiguration miningConfiguration;
   private final TransactionPool transactionPool;
   private final EthScheduler ethScheduler;
+  private final EncodingContext transactionEncoding;
 
   public TestingBuildBlockV1(
       final ProtocolContext protocolContext,
@@ -90,11 +93,34 @@ public class TestingBuildBlockV1 implements JsonRpcMethod {
       final MiningConfiguration miningConfiguration,
       final TransactionPool transactionPool,
       final EthScheduler ethScheduler) {
+    this(
+        protocolContext,
+        protocolSchedule,
+        miningConfiguration,
+        transactionPool,
+        ethScheduler,
+        EncodingContext.POOLED_TRANSACTION);
+  }
+
+  /**
+   * Creates the method with the form the request's transactions are encoded in: {@link
+   * EncodingContext#POOLED_TRANSACTION} on a node, a blob transaction with its blobs, or {@link
+   * EncodingContext#BLOCK_BODY} for transactions copied from an execution payload, a blob
+   * transaction without them.
+   */
+  public TestingBuildBlockV1(
+      final ProtocolContext protocolContext,
+      final ProtocolSchedule protocolSchedule,
+      final MiningConfiguration miningConfiguration,
+      final TransactionPool transactionPool,
+      final EthScheduler ethScheduler,
+      final EncodingContext transactionEncoding) {
     this.protocolContext = protocolContext;
     this.protocolSchedule = protocolSchedule;
     this.miningConfiguration = miningConfiguration;
     this.transactionPool = transactionPool;
     this.ethScheduler = ethScheduler;
+    this.transactionEncoding = transactionEncoding;
   }
 
   @Override
@@ -180,7 +206,7 @@ public class TestingBuildBlockV1 implements JsonRpcMethod {
     final List<Transaction> transactions = new ArrayList<>();
     for (String rawTx : rawTransactions) {
       try {
-        transactions.add(DomainObjectDecodeUtils.decodeRawTransaction(rawTx));
+        transactions.add(DomainObjectDecodeUtils.decodeRawTransaction(rawTx, transactionEncoding));
       } catch (Exception e) {
         LOG.debug("Failed to decode transaction: {}", rawTx, e);
         return errorResponse(
@@ -210,10 +236,21 @@ public class TestingBuildBlockV1 implements JsonRpcMethod {
     final Bytes32 parentBeaconBlockRoot = payloadAttributes.getParentBeaconBlockRoot();
     final Long timestamp = payloadAttributes.getTimestamp();
     final Long slotNumber = payloadAttributes.getSlotNumber();
+    // Before Amsterdam the attributes carry no target, so the configured target gas limit applies,
+    // and the genesis gas limit when none is configured.
     final long targetGasLimit =
         Objects.requireNonNullElseGet(
             payloadAttributes.getTargetGasLimit(),
-            () -> protocolContext.getBlockchain().getGenesisBlock().getHeader().getGasLimit());
+            () ->
+                miningConfiguration
+                    .getTargetGasLimit()
+                    .orElseGet(
+                        () ->
+                            protocolContext
+                                .getBlockchain()
+                                .getGenesisBlock()
+                                .getHeader()
+                                .getGasLimit()));
 
     try {
       final Address coinbase = payloadAttributes.getSuggestedFeeRecipient();
@@ -278,29 +315,29 @@ public class TestingBuildBlockV1 implements JsonRpcMethod {
   }
 
   private EngineGetPayloadResultV1 createVersionSpecificResponse(final BlockCreationResult result) {
-    // min supported hard-fork is Prague, since the response is expecting the executionRequests
-    // field. That implies that withdrawals must be present.
-    // The only remaining option is the presence or not of BAL, and that will determine the version
-    // of the response.
+    // The payload is an ExecutionPayloadV4 from Amsterdam on, when the block has an access list,
+    // and an ExecutionPayloadV3 before, as testing_buildBlockV1 specifies. A block before Shanghai
+    // has no withdrawals, so its payload lists none, and a block before Prague has no execution
+    // requests, so the response leaves them out.
 
     final Block block = result.getBlock();
 
-    final List<Request> executionRequests =
-        result
-            .getRequests()
-            .map(Request::asCanonicalList)
-            .orElseThrow(() -> new IllegalStateException("execution requests missing"));
-    final List<Withdrawal> withdrawals =
-        block
-            .getBody()
-            .getWithdrawals()
-            .orElseThrow(() -> new IllegalStateException("withdrawal missing"));
+    final Optional<List<Request>> executionRequests =
+        result.getRequests().map(Request::asCanonicalList);
+    final List<Withdrawal> withdrawals = block.getBody().getWithdrawals().orElse(List.of());
 
     final BlobsBundleV2 blobsBundle = new BlobsBundleV2(block.getBody().getTransactions());
 
     final Wei blockValue =
         BlockValueCalculator.calculateBlockValue(
             new BlockWithReceipts(block, result.getTransactionSelectionResults().getReceipts()));
+
+    if (executionRequests.isEmpty()) {
+      return new EngineGetPayloadResultV3(
+          new ExecutionPayloadV3(block.getHeader(), block.getBody().getTransactions(), withdrawals),
+          blockValue,
+          blobsBundle);
+    }
 
     final Optional<BlockAccessList> maybeBlockAccessList = result.getBlockAccessList();
 
@@ -310,7 +347,7 @@ public class TestingBuildBlockV1 implements JsonRpcMethod {
           new ExecutionPayloadV3(block.getHeader(), block.getBody().getTransactions(), withdrawals),
           blockValue,
           blobsBundle,
-          executionRequests);
+          executionRequests.get());
     }
 
     // if BAL is present the return Amsterdam response
@@ -322,7 +359,7 @@ public class TestingBuildBlockV1 implements JsonRpcMethod {
             maybeBlockAccessList.get()),
         blockValue,
         blobsBundle,
-        executionRequests);
+        executionRequests.get());
   }
 
   private ValidationResult<RpcErrorType> validatePayloadAttributes(

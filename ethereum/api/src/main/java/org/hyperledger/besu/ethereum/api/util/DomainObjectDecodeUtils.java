@@ -27,9 +27,25 @@ public class DomainObjectDecodeUtils {
 
   public static Transaction decodeRawTransaction(final String rawTransaction)
       throws InvalidJsonRpcRequestException {
+    return decodeRawTransaction(rawTransaction, EncodingContext.POOLED_TRANSACTION);
+  }
+
+  /**
+   * Decodes a raw transaction in the given form: {@link EncodingContext#POOLED_TRANSACTION} as a
+   * node receives one, a blob transaction with its blobs, or {@link EncodingContext#BLOCK_BODY} as
+   * a block carries one, a blob transaction without them.
+   *
+   * @param rawTransaction the transaction, hex encoded
+   * @param encodingContext the form the transaction is encoded in
+   * @return the decoded transaction
+   * @throws InvalidJsonRpcRequestException if the transaction cannot be decoded
+   */
+  public static Transaction decodeRawTransaction(
+      final String rawTransaction, final EncodingContext encodingContext)
+      throws InvalidJsonRpcRequestException {
     try {
       Bytes txnBytes = Bytes.fromHexString(rawTransaction);
-      return TransactionDecoder.decodeOpaqueBytes(txnBytes, EncodingContext.POOLED_TRANSACTION);
+      return TransactionDecoder.decodeOpaqueBytes(txnBytes, encodingContext);
     } catch (final IllegalArgumentException e) {
       throw new InvalidJsonRpcRequestException(
           "Invalid raw transaction hex", RpcErrorType.INVALID_TRANSACTION_PARAMS, e);
