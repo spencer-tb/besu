@@ -34,6 +34,7 @@ import org.hyperledger.besu.ethereum.core.Block;
 import org.hyperledger.besu.ethereum.core.BlockHeader;
 import org.hyperledger.besu.ethereum.core.BlockHeaderTestFixture;
 import org.hyperledger.besu.ethereum.core.MiningConfiguration;
+import org.hyperledger.besu.ethereum.core.encoding.EncodingContext;
 import org.hyperledger.besu.ethereum.eth.manager.EthScheduler;
 import org.hyperledger.besu.ethereum.eth.transactions.TransactionPool;
 import org.hyperledger.besu.ethereum.mainnet.ProtocolSchedule;
@@ -128,6 +129,42 @@ class TestingBuildBlockV1Test {
     final JsonRpcErrorResponse errorResponse = (JsonRpcErrorResponse) response;
     assertThat(errorResponse.getError().getCode())
         .isEqualTo(RpcErrorType.INVALID_TRANSACTION_PARAMS.getCode());
+  }
+
+  @Test
+  void shouldDecodeABlobTransactionWithoutItsBlobsOnlyWhenAskedForTheBlockForm() {
+    // A blob transaction as an execution payload carries it: no blobs, commitments or proofs.
+    final String blobTransaction =
+        "0x03f886018080078307a12094ca46ef5ab363d3fa9396cb4eec5deb4bc8d5ddfc8080c001e1a0010000000000"
+            + "000000000000000000000000000000000000000000000000000080a01ba5402057bbe06c9c65ea53c2a4e676"
+            + "b02ef89de2ae8cd7cbb1dfae195dffffa058b831cb931812d6daa8de00083a7fdc9b125eded99c9183383f160"
+            + "7cd7c07e9";
+    final BlockHeader parentHeader =
+        new BlockHeaderTestFixture().timestamp(DEFAULT_TIMESTAMP).buildHeader();
+    when(blockchain.getBlockHeader(any(Hash.class))).thenReturn(Optional.of(parentHeader));
+    final JsonRpcRequestContext request =
+        requestWithTransactions(
+            parentHeader.getHash().toHexString(),
+            new String[] {blobTransaction},
+            DEFAULT_TIMESTAMP + 1);
+
+    final JsonRpcResponse pooled = method.response(request);
+    assertThat(((JsonRpcErrorResponse) pooled).getError().getCode())
+        .isEqualTo(RpcErrorType.INVALID_TRANSACTION_PARAMS.getCode());
+
+    // In block form it decodes, and the build goes on until block creation fails under the mocked
+    // protocol schedule.
+    final TestingBuildBlockV1 blockForm =
+        new TestingBuildBlockV1(
+            protocolContext,
+            protocolSchedule,
+            miningConfiguration,
+            transactionPool,
+            ethScheduler,
+            EncodingContext.BLOCK_BODY);
+    final JsonRpcResponse built = blockForm.response(request);
+    assertThat(((JsonRpcErrorResponse) built).getError().getCode())
+        .isEqualTo(RpcErrorType.INTERNAL_ERROR.getCode());
   }
 
   @Test

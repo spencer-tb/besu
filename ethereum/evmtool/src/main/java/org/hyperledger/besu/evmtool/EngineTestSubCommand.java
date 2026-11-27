@@ -145,11 +145,6 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
   /** Process exit code: 0 when all executed tests pass, 1 when any failed. */
   private volatile int exitCode = 0;
 
-  /**
-   * Whether any test reached the shared engine machinery, and so whether it needs shutting down.
-   */
-  private volatile boolean harnessUsed = false;
-
   @Option(
       names = {"--test-name"},
       description =
@@ -218,6 +213,12 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
 
   private final List<ObjectNode> jsonArrayResults = Collections.synchronizedList(new ArrayList<>());
 
+  /**
+   * Whether this runs as {@code build-test}, which builds each payload the fixture expects to be
+   * valid before importing it.
+   */
+  private boolean build = false;
+
   @ParentCommand private final EvmToolCommand parentCommand;
 
   @Parameters private final List<Path> engineTestFiles = new ArrayList<>();
@@ -230,6 +231,31 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
 
   EngineTestSubCommand(final EvmToolCommand parentCommand) {
     this.parentCommand = parentCommand;
+  }
+
+  /**
+   * The runner behind {@code build-test}: engine-test's replay, with each payload the fixture
+   * expects to be valid first built and compared, and the ones it expects to be invalid skipped. It
+   * takes none of the BAL or exception flags, since Besu derives each access list itself while
+   * building and no rejection is expected.
+   */
+  static EngineTestSubCommand forBuildTest(
+      final EvmToolCommand parentCommand,
+      final @Nullable String testName,
+      final @Nullable String testNameRegex,
+      final int workers,
+      final boolean jsonArray,
+      final boolean verbose,
+      final List<Path> files) {
+    final EngineTestSubCommand runner = new EngineTestSubCommand(parentCommand);
+    runner.build = true;
+    runner.testName = testName;
+    runner.testNameRegex = testNameRegex;
+    runner.workers = workers;
+    runner.jsonArray = jsonArray;
+    runner.verbose = verbose;
+    runner.engineTestFiles.addAll(files);
+    return runner;
   }
 
   @Override
@@ -312,9 +338,7 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
       // running keeps a JVM that does not exit alive for good. EvmTool.main does exit, but an
       // in-process caller — a future unit test, as EvmToolSpecTests already is for state-test —
       // would hang. Only after the run: they are shared by every test in it.
-      if (harnessUsed) {
-        EngineHarness.shutdown();
-      }
+      EngineHarness.shutdown();
     }
   }
 
@@ -362,7 +386,8 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
   private static final ObjectMapper SHARED_PARAMS_MAPPER = JsonUtils.createObjectMapper();
 
   /**
-   * The engine machinery every test in a run shares, created once on first use.
+   * The engine machinery every test in a run shares, created on first use and stopped when the run
+   * ends, so a later run in the same JVM, such as the next unit test, starts machinery of its own.
    *
    * <p>These live in a holder rather than in static fields of the subcommand because picocli
    * instantiates every registered subcommand when it builds the {@code CommandLine}, which loads
@@ -372,16 +397,6 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
    */
   private static final class EngineHarness {
     private static final NoOpMetricsSystem METRICS = new NoOpMetricsSystem();
-    private static final Vertx VERTX = Vertx.vertx();
-    private static final EthScheduler SCHEDULER =
-        new EthScheduler(
-            Runtime.getRuntime().availableProcessors(),
-            1,
-            Runtime.getRuntime().availableProcessors(),
-            METRICS);
-    private static final EthPeers PEERS = new HarnessEthPeers(METRICS);
-    private static final EthContext ETH_CONTEXT =
-        new EthContext(PEERS, new EthMessages(), SCHEDULER, null);
     private static final SynchronizerConfiguration SYNC_CONFIGURATION =
         SynchronizerConfiguration.builder().build();
     private static final BackwardSyncAlgorithmFactory BACKWARD_SYNC_ALGORITHMS =
@@ -397,21 +412,48 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
           public void stop() {}
         };
 
+    private static @Nullable EngineHarness running;
+
+    private final Vertx vertx = Vertx.vertx();
+    private final EthScheduler scheduler =
+        new EthScheduler(
+            Runtime.getRuntime().availableProcessors(),
+            1,
+            Runtime.getRuntime().availableProcessors(),
+            METRICS);
+    private final EthPeers peers = new HarnessEthPeers(METRICS);
+    private final EthContext ethContext = new EthContext(peers, new EthMessages(), scheduler, null);
+
+    private EngineHarness() {}
+
+    /** Returns the run's machinery, starting it on the run's first use. */
+    private static synchronized EngineHarness get() {
+      EngineHarness harness = running;
+      if (harness == null) {
+        harness = new EngineHarness();
+        running = harness;
+      }
+      return harness;
+    }
+
     /**
      * Stops the event loop and the executor pools, so a caller that does not exit the JVM is not
      * left with them running for its lifetime.
      */
-    private static void shutdown() {
-      SCHEDULER.stop();
+    private static synchronized void shutdown() {
+      final EngineHarness harness = running;
+      if (harness == null) {
+        return;
+      }
+      running = null;
+      harness.scheduler.stop();
       try {
-        SCHEDULER.awaitStop();
+        harness.scheduler.awaitStop();
       } catch (final InterruptedException e) {
         Thread.currentThread().interrupt();
       }
-      VERTX.close();
+      harness.vertx.close();
     }
-
-    private EngineHarness() {}
   }
 
   /**
@@ -545,7 +587,7 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
             schedule,
             EngineHarness.SYNC_CONFIGURATION,
             EngineHarness.METRICS,
-            EngineHarness.ETH_CONTEXT,
+            EngineHarness.get().ethContext,
             // Read only by backward sync, which waits for isInitialSyncDone(), never set here.
             null,
             BackwardChain.from(
@@ -558,7 +600,7 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
     return new MergeCoordinator(
         context,
         schedule,
-        EngineHarness.SCHEDULER,
+        EngineHarness.get().scheduler,
         null,
         MiningConfiguration.newDefault(),
         backwardSyncContext) {
@@ -589,9 +631,7 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
       final ProtocolContext context,
       final FixtureRunner.TestResults results) {
 
-    // Use shared static instances to avoid thread exhaustion across tests. Recorded so run() knows
-    // whether there is anything to shut down without touching the holder and initialising it.
-    harnessUsed = true;
+    // The run's machinery is shared by every test in it, to avoid thread exhaustion across tests.
     final MergeCoordinator coordinator = newMergeCoordinator(context, schedule, reporter);
 
     // Lazily create engine methods — most tests use only 1-2 versions, not all 9
@@ -599,10 +639,10 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
         new ExecutionEngineJsonRpcMethod.ConstructorArguments(
             schedule,
             context,
-            EngineHarness.VERTX,
+            EngineHarness.get().vertx,
             EngineHarness.LISTENER,
             coordinator,
-            EngineHarness.PEERS,
+            EngineHarness.get().peers,
             EngineHarness.METRICS,
             // Only read by engine_forkchoiceUpdatedV4 when the call carries custodyColumns, which
             // the fixtures never do — there is no transaction pool behind this runner.
@@ -723,8 +763,24 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
     }
 
     final ArrayNode rejections = FixtureRunner.newRejections();
+    final FixturePayloadBuilder builder =
+        build ? new FixturePayloadBuilder(context, schedule, EngineHarness.get().scheduler) : null;
     for (int i = 0; i < payloads.length; i++) {
       final EngineTestCaseSpec.EngineNewPayload payload = payloads[i];
+      if (builder != null) {
+        // A payload expected to be invalid is neither built nor imported: nothing builds on it.
+        if (!payload.expectsValid()) {
+          continue;
+        }
+        try {
+          builder.build(i, payload, rejections);
+        } catch (final Exception e) {
+          // As for the import below, anything escaping the method is a defect, not a refusal.
+          testPassed = false;
+          failureReason = String.format("payload %d: build: %s: %s", i, e.getClass().getName(), e);
+          break;
+        }
+      }
       final int version = payload.getNewPayloadVersion();
 
       final ExecutionEngineJsonRpcMethod method = getNewPayload.apply(version);
@@ -926,6 +982,13 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
       }
     }
 
+    // A build test also fails on a payload Besu built differently or refused to build.
+    final String buildFailure = builder == null ? null : builder.failure();
+    if (testPassed && buildFailure != null) {
+      testPassed = false;
+      failureReason = buildFailure;
+    }
+
     // Validate last block hash
     if (testPassed && !blockchain.getChainHeadHash().equals(spec.getLastBlockHash())) {
       testPassed = false;
@@ -943,6 +1006,7 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
         testPassed ? "" : failureReason,
         lastPayloadStatus,
         rejections,
+        builder,
         results);
   }
 
@@ -950,7 +1014,7 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
    * Formats a JSON-RPC error as the rejection reason: {@code <code>: <message>}, followed by {@code
    * : <data>} when the error carries data.
    */
-  private static String rpcError(final JsonRpcError error) {
+  static String rpcError(final JsonRpcError error) {
     final String reason = error.getCode() + ": " + error.getMessage();
     return error.getData() == null ? reason : reason + ": " + error.getData();
   }
@@ -1003,6 +1067,7 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
         failureReason,
         null,
         FixtureRunner.newRejections(),
+        null,
         results);
   }
 
@@ -1015,6 +1080,8 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
    *
    * @param blockchain the chain to report a head hash from, or null when the failure happened
    *     before there was one
+   * @param builder what a build test built, or null for engine-test and a build test that ended
+   *     before its payloads were reached
    */
   private void recordResult(
       final String test,
@@ -1024,6 +1091,7 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
       final String failureReason,
       final @Nullable EngineStatus lastPayloadStatus,
       final ArrayNode rejections,
+      final @Nullable FixturePayloadBuilder builder,
       final FixtureRunner.TestResults results) {
     if (testPassed) {
       if (verbose) {
@@ -1052,6 +1120,15 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
       // failed one.
       result.put("error", failureReason);
       result.set("rejections", rejections);
+      if (build) {
+        if (builder == null) {
+          result.put("built", 0);
+          result.putArray("mismatches");
+        } else {
+          result.put("built", builder.built());
+          result.set("mismatches", builder.mismatches());
+        }
+      }
       jsonArrayResults.add(result);
     }
   }

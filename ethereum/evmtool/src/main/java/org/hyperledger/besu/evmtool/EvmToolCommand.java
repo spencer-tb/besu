@@ -104,6 +104,7 @@ import picocli.CommandLine.Option;
       BenchmarkSubCommand.class,
       B11rSubCommand.class,
       BlockchainTestSubCommand.class,
+      BuildTestSubCommand.class,
       EngineTestSubCommand.class,
       StateTestSubCommand.class,
       T8nSubCommand.class,
