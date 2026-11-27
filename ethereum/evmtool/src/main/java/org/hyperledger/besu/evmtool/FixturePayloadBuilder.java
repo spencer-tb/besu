@@ -19,6 +19,7 @@ import org.hyperledger.besu.ethereum.api.jsonrpc.JsonRpcObjectMapperFactory;
 import org.hyperledger.besu.ethereum.api.jsonrpc.internal.JsonRpcRequest;
 import org.hyperledger.besu.ethereum.api.jsonrpc.internal.JsonRpcRequestContext;
 import org.hyperledger.besu.ethereum.api.jsonrpc.internal.exception.InvalidJsonRpcRequestException;
+import org.hyperledger.besu.ethereum.api.jsonrpc.internal.methods.JsonRpcMethod;
 import org.hyperledger.besu.ethereum.api.jsonrpc.internal.methods.testing.TestingBuildBlockV1;
 import org.hyperledger.besu.ethereum.api.jsonrpc.internal.response.JsonRpcError;
 import org.hyperledger.besu.ethereum.api.jsonrpc.internal.response.JsonRpcErrorResponse;
@@ -49,8 +50,8 @@ import org.jspecify.annotations.Nullable;
  *
  * <p>The transactions are the payload's, so a blob transaction comes without its blobs: the method
  * decodes them as a block carries them, which only this runner does. The payload's gas limit is the
- * builder's target, as {@code targetGasLimit} from Amsterdam on and as the configured target gas
- * limit before.
+ * builder's target as {@code targetGasLimit} for every block: the method takes it on any fork, and
+ * has no gas target of its own before Amsterdam.
  */
 final class FixturePayloadBuilder {
 
@@ -60,8 +61,7 @@ final class FixturePayloadBuilder {
   private static final ObjectMapper RESPONSE_MAPPER =
       JsonRpcObjectMapperFactory.getResponseMapper();
 
-  private final MiningConfiguration miningConfiguration = MiningConfiguration.newDefault();
-  private final TestingBuildBlockV1 method;
+  private final JsonRpcMethod method;
   private final ArrayNode mismatches = JsonNodeFactory.instance.arrayNode();
   private int built = 0;
   private int refused = 0;
@@ -71,9 +71,21 @@ final class FixturePayloadBuilder {
       final ProtocolSchedule schedule,
       final EthScheduler scheduler) {
     // No transaction pool: a build test always names the block's transactions.
-    method =
+    this(
         new TestingBuildBlockV1(
-            context, schedule, miningConfiguration, null, scheduler, EncodingContext.BLOCK_BODY);
+            context,
+            schedule,
+            MiningConfiguration.newDefault(),
+            null,
+            scheduler,
+            EncodingContext.BLOCK_BODY));
+  }
+
+  /**
+   * Builds through {@code method}, the {@code testing_buildBlockV1} method or a stand-in for it.
+   */
+  FixturePayloadBuilder(final JsonRpcMethod method) {
+    this.method = method;
   }
 
   /**
@@ -85,7 +97,6 @@ final class FixturePayloadBuilder {
       final EngineTestCaseSpec.EngineNewPayload payload,
       final ArrayNode rejections) {
     final JsonNode want = payload.getParams()[0];
-    miningConfiguration.setTargetGasLimit(Long.decode(want.get("gasLimit").asText()));
 
     final ObjectNode attributes = JsonNodeFactory.instance.objectNode();
     attributes.set("timestamp", want.get("timestamp"));
@@ -98,11 +109,12 @@ final class FixturePayloadBuilder {
     if (payload.getNewPayloadVersion() >= 3) {
       attributes.set("parentBeaconBlockRoot", payload.getParams()[2]);
     }
-    // The slot number and the gas limit target are attributes from forkchoiceUpdatedV4 on.
+    // The slot number is an attribute from forkchoiceUpdatedV4 on. The gas limit target is too, and
+    // the method also takes it before, where it otherwise targets the genesis gas limit.
     if (payload.getForkchoiceUpdatedVersion() >= 4) {
       attributes.set("slotNumber", want.get("slotNumber"));
-      attributes.set("targetGasLimit", want.get("gasLimit"));
     }
+    attributes.set("targetGasLimit", want.get("gasLimit"));
     final String[] transactions = new String[want.get("transactions").size()];
     for (int i = 0; i < transactions.length; i++) {
       transactions[i] = want.get("transactions").get(i).asText();
@@ -129,9 +141,8 @@ final class FixturePayloadBuilder {
     final JsonNode result =
         RESPONSE_MAPPER.valueToTree(((JsonRpcSuccessResponse) response).getResult());
     // Only the fixture's fields: before Amsterdam the method returns an ExecutionPayloadV3, so a
-    // block
-    // before Cancun comes back with Cancun's fields, and the block hash already covers the header
-    // Besu built.
+    // block before Cancun comes back with Cancun's fields, and the block hash already covers the
+    // header Besu built.
     final JsonNode got = result.get("executionPayload");
     for (final Iterator<String> names = want.fieldNames(); names.hasNext(); ) {
       final String name = names.next();

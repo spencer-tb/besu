@@ -236,21 +236,10 @@ public class TestingBuildBlockV1 implements JsonRpcMethod {
     final Bytes32 parentBeaconBlockRoot = payloadAttributes.getParentBeaconBlockRoot();
     final Long timestamp = payloadAttributes.getTimestamp();
     final Long slotNumber = payloadAttributes.getSlotNumber();
-    // Before Amsterdam the attributes carry no target, so the configured target gas limit applies,
-    // and the genesis gas limit when none is configured.
     final long targetGasLimit =
         Objects.requireNonNullElseGet(
             payloadAttributes.getTargetGasLimit(),
-            () ->
-                miningConfiguration
-                    .getTargetGasLimit()
-                    .orElseGet(
-                        () ->
-                            protocolContext
-                                .getBlockchain()
-                                .getGenesisBlock()
-                                .getHeader()
-                                .getGasLimit()));
+            () -> protocolContext.getBlockchain().getGenesisBlock().getHeader().getGasLimit());
 
     try {
       final Address coinbase = payloadAttributes.getSuggestedFeeRecipient();

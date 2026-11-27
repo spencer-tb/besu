@@ -149,7 +149,7 @@ fork groups, so `for_frontier`, `for_homestead`, `for_tangerinewhistle`, `for_sp
 `for_byzantium`, `for_constantinoplefix`, `for_istanbul`, `for_berlin` and `for_london` exist only
 in `blockchain_tests`.
 
-`evmtool build-test` stands in for the EELS `build_block` hive simulator, which builds each payload
+`evmtool build-test` stands in for the `ethereum/eels/build-block` hive simulator, which builds each payload
 a fixture expects to be valid through a running client's `testing_buildBlockV1`. It builds each one
 in process, on the payload's parent and with the payload's gas limit as the target, compares every
 field of the fixture's payload with the built one's, `gasLimit` and `blockHash` included, and then
@@ -344,11 +344,13 @@ $EVM engine-test stdin < <path-to>/one_fixture.json
 
 #### Client test runner interface
 
-`block-test` and `engine-test` follow the client test runner interface that execution clients
-share, so a harness can drive them as it drives other clients' runners: see
+`block-test`, `engine-test` and `build-test` follow the client test runner interface that execution
+clients share, so a harness can drive them as it drives other clients' runners: see
 [ethereum/execution-specs#3846](https://github.com/ethereum/execution-specs/pull/3846). Besu specifics:
 
-- Both run blocks on the parallel block processor, as a Bonsai node does. `--bal-sequential` runs
+- `build-test`'s `--json-array` rows add `built` and `mismatches`, and it takes none of the BAL
+  flags.
+- `block-test` and `engine-test` run blocks on the parallel block processor, as a Bonsai node does. `--bal-sequential` runs
   every block on the sequential block processor instead.
 - `--bal-report` lines carry one more key, `scheduler`: `bal` when transactions are scheduled from
   the block's access list, `optimistic` when the block has none. A sequential line's `reason` is

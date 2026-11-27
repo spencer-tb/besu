@@ -145,11 +145,6 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
   /** Process exit code: 0 when all executed tests pass, 1 when any failed. */
   private volatile int exitCode = 0;
 
-  /**
-   * Whether any test reached the shared engine machinery, and so whether it needs shutting down.
-   */
-  private volatile boolean harnessUsed = false;
-
   @Option(
       names = {"--test-name"},
       description =
@@ -343,9 +338,7 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
       // running keeps a JVM that does not exit alive for good. EvmTool.main does exit, but an
       // in-process caller — a future unit test, as EvmToolSpecTests already is for state-test —
       // would hang. Only after the run: they are shared by every test in it.
-      if (harnessUsed) {
-        EngineHarness.shutdown();
-      }
+      EngineHarness.shutdown();
     }
   }
 
@@ -638,9 +631,7 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
       final ProtocolContext context,
       final FixtureRunner.TestResults results) {
 
-    // Use shared static instances to avoid thread exhaustion across tests. Recorded so run() knows
-    // whether there is anything to shut down without touching the holder and initialising it.
-    harnessUsed = true;
+    // The run's machinery is shared by every test in it, to avoid thread exhaustion across tests.
     final MergeCoordinator coordinator = newMergeCoordinator(context, schedule, reporter);
 
     // Lazily create engine methods — most tests use only 1-2 versions, not all 9
@@ -1089,7 +1080,8 @@ public class EngineTestSubCommand implements Runnable, IExitCodeGenerator {
    *
    * @param blockchain the chain to report a head hash from, or null when the failure happened
    *     before there was one
-   * @param builder what a build test built, or null when it ended before any payload was built
+   * @param builder what a build test built, or null for engine-test and a build test that ended
+   *     before its payloads were reached
    */
   private void recordResult(
       final String test,
